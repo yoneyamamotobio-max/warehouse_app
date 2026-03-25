@@ -1,0 +1,75 @@
+﻿2026-03-24 16:20:50
+System.InvalidOperationException: SplitterDistance は Panel1MinSize と幅 Panel2MinSize の間でなければなりません。
+   場所 System.Windows.Forms.SplitContainer.set_SplitterDistance(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.ApplyPanel2MinSize(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.set_Panel2MinSize(Int32 value)
+   場所 InventoryDesktopApp.MainForm.BuildBottomArea()
+   場所 InventoryDesktopApp.MainForm.BuildLayout()
+   場所 InventoryDesktopApp.MainForm..ctor()
+   場所 InventoryDesktopApp.Program.Main()
+--------------------------------------------------------------------------------
+2026-03-24 16:20:54
+System.InvalidOperationException: SplitterDistance は Panel1MinSize と幅 Panel2MinSize の間でなければなりません。
+   場所 System.Windows.Forms.SplitContainer.set_SplitterDistance(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.ApplyPanel2MinSize(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.set_Panel2MinSize(Int32 value)
+   場所 InventoryDesktopApp.MainForm.BuildBottomArea()
+   場所 InventoryDesktopApp.MainForm.BuildLayout()
+   場所 InventoryDesktopApp.MainForm..ctor()
+   場所 InventoryDesktopApp.Program.Main()
+--------------------------------------------------------------------------------
+2026-03-24 16:21:57
+System.InvalidOperationException: SplitterDistance は Panel1MinSize と幅 Panel2MinSize の間でなければなりません。
+   場所 System.Windows.Forms.SplitContainer.set_SplitterDistance(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.ApplyPanel2MinSize(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.set_Panel2MinSize(Int32 value)
+   場所 InventoryDesktopApp.MainForm.BuildBottomArea()
+   場所 InventoryDesktopApp.MainForm.BuildLayout()
+   場所 InventoryDesktopApp.MainForm..ctor()
+   場所 InventoryDesktopApp.Program.Main()
+--------------------------------------------------------------------------------
+2026-03-24 16:22:17
+System.InvalidOperationException: SplitterDistance は Panel1MinSize と幅 Panel2MinSize の間でなければなりません。
+   場所 System.Windows.Forms.SplitContainer.set_SplitterDistance(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.ApplyPanel2MinSize(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.set_Panel2MinSize(Int32 value)
+   場所 InventoryDesktopApp.MainForm.BuildBottomArea()
+   場所 InventoryDesktopApp.MainForm.BuildLayout()
+   場所 InventoryDesktopApp.MainForm..ctor()
+   場所 InventoryDesktopApp.Program.Main()
+--------------------------------------------------------------------------------
+2026-03-24 16:22:35
+System.InvalidOperationException: SplitterDistance は Panel1MinSize と幅 Panel2MinSize の間でなければなりません。
+   場所 System.Windows.Forms.SplitContainer.set_SplitterDistance(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.ApplyPanel2MinSize(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.set_Panel2MinSize(Int32 value)
+   場所 InventoryDesktopApp.MainForm.BuildBottomArea()
+   場所 InventoryDesktopApp.MainForm.BuildLayout()
+   場所 InventoryDesktopApp.MainForm..ctor()
+   場所 InventoryDesktopApp.Program.Main()
+--------------------------------------------------------------------------------
+2026-03-24 16:32:52
+System.InvalidOperationException: SplitterDistance は Panel1MinSize と幅 Panel2MinSize の間でなければなりません。
+   場所 System.Windows.Forms.SplitContainer.set_SplitterDistance(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.ApplyPanel2MinSize(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.set_Panel2MinSize(Int32 value)
+   場所 InventoryDesktopApp.MainForm.BuildBottomArea()
+   場所 InventoryDesktopApp.MainForm.BuildLayout()
+   場所 InventoryDesktopApp.MainForm..ctor()
+   場所 InventoryDesktopApp.Program.Main()
+--------------------------------------------------------------------------------
+2026-03-24 17:03:08
+System.InvalidOperationException: SplitterDistance は Panel1MinSize と幅 Panel2MinSize の間でなければなりません。
+   場所 System.Windows.Forms.SplitContainer.set_SplitterDistance(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.ApplyPanel1MinSize(Int32 value)
+   場所 System.Windows.Forms.SplitContainer.set_Panel1MinSize(Int32 value)
+   場所 InventoryDesktopApp.MainForm.ApplyResponsiveLayout()
+   場所 System.Windows.Forms.Control.OnResize(EventArgs e)
+   場所 System.Windows.Forms.Form.OnResize(EventArgs e)
+   場所 System.Windows.Forms.Control.OnSizeChanged(EventArgs e)
+   場所 System.Windows.Forms.Control.UpdateBounds(Int32 x, Int32 y, Int32 width, Int32 height, Int32 clientWidth, Int32 clientHeight)
+   場所 System.Windows.Forms.Control.UpdateBounds()
+   場所 System.Windows.Forms.Control.WndProc(Message& m)
+   場所 System.Windows.Forms.Form.WndProc(Message& m)
+   場所 System.Windows.Forms.NativeWindow.Callback(IntPtr hWnd, Int32 msg, IntPtr wparam, IntPtr lparam)
+--------------------------------------------------------------------------------

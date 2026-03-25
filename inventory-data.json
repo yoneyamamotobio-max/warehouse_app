@@ -1,0 +1,83 @@
+{
+  "locations": [
+    "A-01",
+    "A-02",
+    "A-03",
+    "B-01",
+    "B-02",
+    "C-01",
+    "STAGE-1",
+    "STAGE-2"
+  ],
+  "pallets": [
+    {
+      "pallet_number": "R080324",
+      "location_code": "B-01",
+      "stack_order": 0,
+      "orientation": 90,
+      "map_x": 0.16792656587473,
+      "map_y": 0.41317365269461076,
+      "updated_at": "2026-03-24 17:39:31",
+      "items": [
+        {
+          "line_id": "0b1de265248a4f86be268b9abc04575e",
+          "part_code": "38",
+          "size": "LL",
+          "thickness_mm": 10,
+          "finish_text": "S/S",
+          "grade": "A",
+          "sheet_count": 80
+        },
+        {
+          "line_id": "4372a30d3cc7425e9f4bc58666081183",
+          "part_code": "38",
+          "size": "LL",
+          "thickness_mm": 10,
+          "finish_text": "S/S",
+          "grade": "B",
+          "sheet_count": 5
+        }
+      ]
+    },
+    {
+      "pallet_number": "R080323",
+      "location_code": "C-01",
+      "stack_order": 1,
+      "orientation": 0,
+      "map_x": 0.296976241900648,
+      "map_y": 0.03592814371257485,
+      "updated_at": "2026-03-24 17:41:53",
+      "items": [
+        {
+          "line_id": "fe3a852916d34c9a82ac71da70abc0d9",
+          "part_code": "45",
+          "size": "L",
+          "thickness_mm": 10,
+          "finish_text": "S/S",
+          "grade": "A",
+          "sheet_count": 80
+        }
+      ]
+    },
+    {
+      "pallet_number": "R080322E",
+      "location_code": "C-01",
+      "stack_order": 0,
+      "orientation": 90,
+      "map_x": 0.3558315334773218,
+      "map_y": 0.1691616766467066,
+      "updated_at": "2026-03-24 17:41:51",
+      "items": [
+        {
+          "line_id": "4066a01a9e824ed7a9e66c9ba14c40a9",
+          "part_code": "88",
+          "size": "OL",
+          "thickness_mm": 16,
+          "finish_text": "S/S",
+          "grade": "A",
+          "sheet_count": 45
+        }
+      ]
+    }
+  ]
+}
