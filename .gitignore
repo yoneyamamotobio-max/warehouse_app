@@ -1,0 +1,35 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+venv/
+.venv/
+env/
+
+dist/
+build/
+*.spec
+
+*.log
+*.sqlite3
+*.db
+
+.env
+
+# VS Code
+.vscode/
+
+# OS系
+.DS_Store
+Thumbs.db
+
+# PyInstaller関連（exe作るなら）
+*.exe
+*.manifest
+
+# pytestなど
+.pytest_cache/
+
+# mypyなど
+.mypy_cache/
