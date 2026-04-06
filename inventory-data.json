@@ -405,15 +405,15 @@
   "pallets": [
     {
       "pallet_number": "38651",
-      "location_code": "C5",
+      "location_code": "E17",
       "received_date": "",
       "color_key": "AUTO",
       "stack_order": 1,
       "stack_group": "R080326",
       "orientation": 0,
-      "map_x": 0.125,
-      "map_y": 0.225,
-      "updated_at": "2026-04-03 16:29:16",
+      "map_x": 0.225,
+      "map_y": 0.825,
+      "updated_at": "2026-04-06 15:25:47",
       "items": [
         {
           "line_id": "f1d3d815f6534a23b4041e1aba0484da",
@@ -429,15 +429,15 @@
     },
     {
       "pallet_number": "R080326",
-      "location_code": "C5",
+      "location_code": "E17",
       "received_date": "",
       "color_key": "RED",
       "stack_order": 0,
       "stack_group": "R080326",
       "orientation": 0,
-      "map_x": 0.125,
-      "map_y": 0.225,
-      "updated_at": "2026-04-03 16:29:16",
+      "map_x": 0.225,
+      "map_y": 0.825,
+      "updated_at": "2026-04-06 15:25:47",
       "items": [
         {
           "line_id": "b72febe7dd6a42bfa02098a0dd680b0d",
@@ -473,15 +473,15 @@
     },
     {
       "pallet_number": "R060507",
-      "location_code": "H8",
+      "location_code": "O17",
       "received_date": "2026-04-02",
       "color_key": "TEAL",
       "stack_order": 0,
       "stack_group": "R060507",
       "orientation": 0,
-      "map_x": 0.375,
-      "map_y": 0.375,
-      "updated_at": "2026-04-03 16:29:46",
+      "map_x": 0.725,
+      "map_y": 0.825,
+      "updated_at": "2026-04-06 15:25:15",
       "items": [
         {
           "line_id": "4c4bca472e3949c8a7ea53e1d2fb4396",
@@ -497,15 +497,15 @@
     },
     {
       "pallet_number": "--------",
-      "location_code": "C5",
+      "location_code": "E17",
       "received_date": "2026-04-03",
       "color_key": "AUTO",
       "stack_order": 2,
       "stack_group": "R080326",
       "orientation": 0,
-      "map_x": 0.125,
-      "map_y": 0.225,
-      "updated_at": "2026-04-03 16:29:16",
+      "map_x": 0.225,
+      "map_y": 0.825,
+      "updated_at": "2026-04-06 15:25:47",
       "items": [
         {
           "line_id": "23797826f08c439b8c04a649317a8d96",
@@ -521,15 +521,15 @@
     },
     {
       "pallet_number": "R040303",
-      "location_code": "F4",
+      "location_code": "J17",
       "received_date": "",
       "color_key": "AUTO",
       "stack_order": 0,
       "stack_group": "R040303",
       "orientation": 0,
-      "map_x": 0.275,
-      "map_y": 0.17500000000000004,
-      "updated_at": "2026-04-03 16:44:38",
+      "map_x": 0.475,
+      "map_y": 0.825,
+      "updated_at": "2026-04-06 15:25:45",
       "items": [
         {
           "line_id": "e7212c2d3bc24499b81c1f2401db5b61",

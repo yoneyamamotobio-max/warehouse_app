@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import re
 import sys
 import ctypes
 from dataclasses import asdict, dataclass, field
@@ -11,7 +12,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPolygonF
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QToolTip, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QAbstractSpinBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QToolTip, QVBoxLayout, QWidget
 
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
@@ -60,7 +61,7 @@ class InventoryItemLine:
     line_id: str = field(default_factory=lambda: uuid4().hex)
     part_code: str = ""
     size: str = "LL"
-    thickness_mm: int = 10
+    thickness_mm: str = "10"
     finish_text: str = "S/S"
     grade: str = "A"
     sheet_count: int = 80
@@ -72,7 +73,7 @@ class InventoryItemLine:
 
     @property
     def height_mm(self) -> int:
-        return self.thickness_mm * self.sheet_count
+        return int(round(parse_thickness_value(self.thickness_mm) * self.sheet_count))
 
 
 @dataclass
@@ -336,6 +337,21 @@ def footprint_mm(pallet: PalletRecord) -> Tuple[int, int]:
     return (depth, width) if pallet.orientation % 180 == 90 else (width, depth)
 
 
+def parse_thickness_value(thickness_text: str) -> float:
+    numbers = [float(value) for value in re.findall(r"\d+(?:\.\d+)?", str(thickness_text or ""))]
+    if not numbers:
+        return 0.0
+    return max(numbers)
+
+
+def format_thickness_value(value: float) -> str:
+    rounded = round(max(0.0, value), 3)
+    if abs(rounded - round(rounded)) < 1e-9:
+        return str(int(round(rounded)))
+    text = f"{rounded:.3f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def clone_item(item: InventoryItemLine, sheet_count: Optional[int] = None) -> InventoryItemLine:
     return InventoryItemLine(
         part_code=item.part_code,
@@ -458,6 +474,30 @@ class ClearOnFocusLineEdit(QLineEdit):
         super().focusInEvent(event)
 
 
+class ThicknessSpinBox(QAbstractSpinBox):
+    textChanged = Signal(str)
+
+    def __init__(self, text: str = "10", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+        self.setAccelerated(True)
+        self.lineEdit().setText(text)
+        self.lineEdit().textChanged.connect(self.textChanged.emit)
+
+    def text(self) -> str:
+        return self.lineEdit().text()
+
+    def setText(self, text: str) -> None:
+        self.lineEdit().setText(text)
+
+    def stepEnabled(self) -> QAbstractSpinBox.StepEnabled:
+        return QAbstractSpinBox.StepUpEnabled | QAbstractSpinBox.StepDownEnabled
+
+    def stepBy(self, steps: int) -> None:
+        current = parse_thickness_value(self.text().strip())
+        self.setText(format_thickness_value(current + steps))
+
+
 class RegistrationDialog(QDialog):
     def __init__(self, locations: List[str], parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -483,7 +523,7 @@ class RegistrationDialog(QDialog):
         self.part_code = ClearOnFocusLineEdit("39")
         self.size = QComboBox(); self.size.addItems(["L", "LL", "EL", "OL"])
         self.size.setCurrentText("LL")
-        self.thickness = QSpinBox(); self.thickness.setRange(1, 999); self.thickness.setValue(10)
+        self.thickness = ThicknessSpinBox("10")
         self.finish = ClearOnFocusLineEdit("S/S")
         self.grade = QComboBox(); self.grade.setEditable(True); self.grade.addItems(["A", "B", "C", "K", "片A", "S"])
         self.grade.setCurrentText("A")
@@ -499,7 +539,7 @@ class RegistrationDialog(QDialog):
         root.addWidget(box)
         for widget in [self.part_code, self.finish]: widget.textChanged.connect(self.update_preview)
         self.size.currentTextChanged.connect(self.update_preview); self.grade.currentTextChanged.connect(self.update_preview)
-        self.thickness.valueChanged.connect(self.update_preview); self.sheet_count.valueChanged.connect(self.update_preview)
+        self.thickness.textChanged.connect(self.update_preview); self.sheet_count.valueChanged.connect(self.update_preview)
         self.update_preview()
 
         add_line_button = QPushButton("明細を追加"); add_line_button.clicked.connect(self.add_line); root.addWidget(add_line_button)
@@ -511,22 +551,25 @@ class RegistrationDialog(QDialog):
         root.addWidget(self.item_table, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
+
     def update_preview(self) -> None:
         part = self.part_code.text().replace("#", "").replace("-", "").strip().upper() or "38"
         finish = self.finish.text().strip() or "S/S"
         grade = self.grade.currentText().strip() or "A"
-        self.preview.setText(f"プレビュー: #{part}-{self.size.currentText()}{self.thickness.value()} {finish} {grade} {self.sheet_count.value()}")
+        thickness = self.thickness.text().strip() or "10"
+        self.preview.setText(f"プレビュー: #{part}-{self.size.currentText()}{thickness} {finish} {grade} {self.sheet_count.value()}")
 
     def add_line(self) -> None:
         part = self.part_code.text().replace("#", "").replace("-", "").strip().upper()
+        thickness = self.thickness.text().strip()
         finish = self.finish.text().strip(); grade = self.grade.currentText().strip()
-        if len(part) < 2 or len(part) > 3:
-            QMessageBox.warning(self, "入力エラー", "品番は2〜3桁の英数字で入力してください。")
+        if not part:
+            QMessageBox.warning(self, "入力エラー", "品番を入力してください。")
             return
-        if not finish or not grade:
-            QMessageBox.warning(self, "入力エラー", "加工 / 裏表 と グレードを入力してください。")
+        if not thickness or not finish or not grade:
+            QMessageBox.warning(self, "入力エラー", "厚み、加工 / 裏表、グレードを入力してください。")
             return
-        item = InventoryItemLine(part_code=part, size=self.size.currentText(), thickness_mm=self.thickness.value(), finish_text=finish, grade=grade, sheet_count=self.sheet_count.value(), note=self.note.text().strip())
+        item = InventoryItemLine(part_code=part, size=self.size.currentText(), thickness_mm=thickness, finish_text=finish, grade=grade, sheet_count=self.sheet_count.value(), note=self.note.text().strip())
         self.items.append(item)
         row = self.item_table.rowCount(); self.item_table.insertRow(row)
         self.item_table.setItem(row, 0, QTableWidgetItem(item.identifier)); self.item_table.setItem(row, 1, QTableWidgetItem(str(item.height_mm))); self.item_table.setItem(row, 2, QTableWidgetItem(item.note))
@@ -595,7 +638,7 @@ class EditPalletDialog(QDialog):
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
 
     def add_row(self, item: Optional[InventoryItemLine] = None, insert_at_top: bool = False) -> None:
-        item = item or InventoryItemLine(part_code="", size="LL", thickness_mm=10, finish_text="S/S", grade="A", sheet_count=1)
+        item = item or InventoryItemLine(part_code="", size="LL", thickness_mm="10", finish_text="S/S", grade="A", sheet_count=1)
         row = 0 if insert_at_top else self.item_table.rowCount()
         self.item_table.insertRow(row)
         for col, value in enumerate(["", item.part_code, item.size, str(item.thickness_mm), item.finish_text, item.grade, str(item.sheet_count), item.note]):
@@ -622,7 +665,7 @@ class EditPalletDialog(QDialog):
             cloned = InventoryItemLine(
                 part_code=part_code,
                 size=size or "LL",
-                thickness_mm=int(thickness) if thickness.isdigit() else 10,
+                thickness_mm=thickness or "10",
                 finish_text=finish_text or "S/S",
                 grade=grade or "A",
                 sheet_count=int(sheet_count) if sheet_count.isdigit() else 1,
@@ -655,21 +698,20 @@ class EditPalletDialog(QDialog):
                 values.append((cell.text() if cell else "").strip())
             _, part_code, size, thickness, finish_text, grade, sheet_count, note = values
             part_code = part_code.replace("#", "").replace("-", "").upper()
-            if len(part_code) < 2 or len(part_code) > 3:
-                QMessageBox.warning(self, "入力エラー", f"{row + 1}行目の品番を確認してください。")
+            if not part_code:
+                QMessageBox.warning(self, "入力エラー", f"{row + 1}行目の品番を入力してください。")
                 return None
             try:
-                thickness_value = int(thickness)
                 sheet_count_value = int(sheet_count)
             except ValueError:
-                QMessageBox.warning(self, "入力エラー", f"{row + 1}行目の厚みまたは枚数が数値ではありません。")
+                QMessageBox.warning(self, "入力エラー", f"{row + 1}行目の枚数が数値ではありません。")
                 return None
             if not size:
                 size = "LL"
-            if not finish_text or not grade:
-                QMessageBox.warning(self, "入力エラー", f"{row + 1}行目の加工 / 裏表 と グレードを入力してください。")
+            if not thickness or not finish_text or not grade:
+                QMessageBox.warning(self, "入力エラー", f"{row + 1}行目の厚み、加工 / 裏表、グレードを入力してください。")
                 return None
-            display_items.append(InventoryItemLine(part_code=part_code, size=size.upper(), thickness_mm=thickness_value, finish_text=finish_text, grade=grade, sheet_count=sheet_count_value, note=note))
+            display_items.append(InventoryItemLine(part_code=part_code, size=size.upper(), thickness_mm=thickness, finish_text=finish_text, grade=grade, sheet_count=sheet_count_value, note=note))
 
         items = list(reversed(display_items))
 
@@ -1090,9 +1132,7 @@ class IsometricMapWidget(QWidget):
         self.pan_offset = QPoint()
         self.panning = False
         self.pan_anchor = QPoint()
-        self.view_angle = 0.78
-        self.orbiting = False
-        self.orbit_anchor = QPoint()
+        self.view_rotation = 1
         self.setMinimumHeight(560); self.setMouseTracking(True)
 
     def scaled_bounds(self) -> QRect:
@@ -1104,42 +1144,116 @@ class IsometricMapWidget(QWidget):
 
     def clamp_pan(self) -> None:
         base = self.rect().adjusted(22, 22, -22, -22)
-        max_x = max(0, (int(base.width() * self.zoom) - base.width()) // 2)
-        max_y = max(0, (int(base.height() * self.zoom) - base.height()) // 2)
+        base_pan_x = max(80, int(base.width() * 0.28))
+        base_pan_y = max(60, int(base.height() * 0.22))
+        zoom_pan_x = max(0, (int(base.width() * self.zoom) - base.width()) // 2)
+        zoom_pan_y = max(0, (int(base.height() * self.zoom) - base.height()) // 2)
+        max_x = base_pan_x + zoom_pan_x
+        max_y = base_pan_y + zoom_pan_y
         self.pan_offset.setX(max(-max_x, min(max_x, self.pan_offset.x())))
         self.pan_offset.setY(max(-max_y, min(max_y, self.pan_offset.y())))
 
-    def draw_floor(self, painter: QPainter, bounds: QRect) -> None:
-        cx = bounds.center().x(); cy = bounds.center().y() + 12; hw = bounds.width() * 0.33; hh = bounds.height() * 0.24
-        angle_scale = max(0.45, min(1.15, self.view_angle))
-        hw *= angle_scale
-        floor = QPolygonF([QPointF(cx, cy - hh), QPointF(cx + hw, cy), QPointF(cx, cy + hh), QPointF(cx - hw, cy)])
-        painter.setPen(QPen(QColor("#235f9e"), 2)); painter.drawPolygon(floor); painter.drawLine(QPointF(cx, cy - hh), QPointF(cx, cy + hh)); painter.drawLine(QPointF(cx - hw, cy), QPointF(cx + hw, cy))
-        painter.setPen(QPen(QColor("#16385c"), 1))
-        for i in range(1, 9):
-            t = i / 9.0
-            painter.drawLine(QPointF(cx - hw * (1 - t), cy - hh * t), QPointF(cx + hw * t, cy - hh * (1 - t)))
-            painter.drawLine(QPointF(cx - hw * t, cy + hh * (1 - t)), QPointF(cx + hw * (1 - t), cy + hh * t))
-            painter.drawLine(QPointF(cx - hw * (1 - t), cy + hh * t), QPointF(cx - hw * t, cy - hh * (1 - t)))
-            painter.drawLine(QPointF(cx + hw * t, cy - hh * (1 - t)), QPointF(cx + hw * (1 - t), cy + hh * t))
+    def floor_metrics(self, bounds: QRect) -> Tuple[QPointF, float, float]:
+        origin = QPointF(bounds.center().x(), bounds.top() + max(54.0, bounds.height() * 0.08))
+        half_w = bounds.width() * 0.40
+        half_h = bounds.height() * 0.24
+        return origin, half_w, half_h
 
-    def project_grid_point(self, origin: QPointF, gx: float, gy: float, step_x: float, step_y: float) -> QPointF:
-        x_factor = max(0.28, min(1.35, self.view_angle))
-        y_factor = max(0.18, min(0.75, 1.15 - (self.view_angle * 0.55)))
-        return QPointF(origin.x() + (gx - gy) * step_x * x_factor, origin.y() + (gx + gy) * step_y * y_factor)
+    def rotated_normalized_point(self, nx: float, ny: float) -> Tuple[float, float]:
+        rotation = self.view_rotation % 4
+        if rotation == 1:
+            return ny, 1.0 - nx
+        if rotation == 2:
+            return 1.0 - nx, 1.0 - ny
+        if rotation == 3:
+            return 1.0 - ny, nx
+        return nx, ny
+
+    def project_normalized_point(self, bounds: QRect, nx: float, ny: float) -> QPointF:
+        origin, half_w, half_h = self.floor_metrics(bounds)
+        rx, ry = self.rotated_normalized_point(nx, ny)
+        return QPointF(origin.x() + (rx - ry) * half_w, origin.y() + (rx + ry) * half_h)
+
+    def location_normalized_point(self, location: str) -> Tuple[float, float]:
+        col, row = location_to_grid(location)
+        return (col + 0.5) / GRID_COLUMNS, (row + 0.5) / GRID_ROWS
+
+    def draw_floor(self, painter: QPainter, bounds: QRect) -> None:
+        corners = [
+            self.project_normalized_point(bounds, 0.0, 0.0),
+            self.project_normalized_point(bounds, 1.0, 0.0),
+            self.project_normalized_point(bounds, 1.0, 1.0),
+            self.project_normalized_point(bounds, 0.0, 1.0),
+        ]
+        floor = QPolygonF(corners)
+        painter.setPen(QPen(QColor("#235f9e"), 2))
+        painter.setBrush(QColor(10, 22, 34, 24))
+        painter.drawPolygon(floor)
+        painter.setPen(QPen(QColor("#16385c"), 1))
+        for i in range(1, GRID_COLUMNS):
+            x = i / float(GRID_COLUMNS)
+            painter.drawLine(self.project_normalized_point(bounds, x, 0.0), self.project_normalized_point(bounds, x, 1.0))
+        for i in range(1, GRID_ROWS):
+            y = i / float(GRID_ROWS)
+            painter.drawLine(self.project_normalized_point(bounds, 0.0, y), self.project_normalized_point(bounds, 1.0, y))
+        painter.setPen(QPen(QColor("#235f9e"), 1))
+        painter.drawLine(corners[0], corners[2])
+        painter.drawLine(corners[1], corners[3])
 
     def draw_pallet(self, painter: QPainter, pallet: PalletRecord, base: QPointF) -> QRect:
-        width_mm, depth_mm = footprint_mm(pallet); width = max(18.0, width_mm * 0.022); depth = max(10.0, depth_mm * 0.007); height = max(18.0, min(120.0, pallet.estimated_height_mm * 0.06))
-        ox = base.x(); oy = base.y()
-        top = QPolygonF([QPointF(ox, oy - height), QPointF(ox + width, oy - height - depth * 0.55), QPointF(ox + width + depth, oy - height), QPointF(ox + depth, oy - height + depth * 0.55)])
-        left = QPolygonF([QPointF(ox, oy - height), QPointF(ox + depth, oy - height + depth * 0.55), QPointF(ox + depth, oy + depth * 0.55), QPointF(ox, oy)])
-        right = QPolygonF([QPointF(ox + depth, oy - height + depth * 0.55), QPointF(ox + width + depth, oy - height), QPointF(ox + width + depth, oy), QPointF(ox + depth, oy + depth * 0.55)])
+        width_mm, depth_mm = footprint_mm(pallet)
+        total_width_mm = 42000.0
+        total_depth_mm = 28000.0
+        width_norm = max(0.012, width_mm / total_width_mm)
+        depth_norm = max(0.012, depth_mm / total_depth_mm)
+        cx_norm = pallet.map_x if pallet.map_x is not None else self.location_normalized_point(pallet.location_code)[0]
+        cy_norm = pallet.map_y if pallet.map_y is not None else self.location_normalized_point(pallet.location_code)[1]
+        bounds = self.scaled_bounds()
+        corners_bottom = [
+            self.project_normalized_point(bounds, cx_norm - width_norm / 2.0, cy_norm - depth_norm / 2.0),
+            self.project_normalized_point(bounds, cx_norm + width_norm / 2.0, cy_norm - depth_norm / 2.0),
+            self.project_normalized_point(bounds, cx_norm + width_norm / 2.0, cy_norm + depth_norm / 2.0),
+            self.project_normalized_point(bounds, cx_norm - width_norm / 2.0, cy_norm + depth_norm / 2.0),
+        ]
+        current_center = QPointF(
+            sum(point.x() for point in corners_bottom) / 4.0,
+            sum(point.y() for point in corners_bottom) / 4.0,
+        )
+        offset_x = base.x() - current_center.x()
+        offset_y = base.y() - current_center.y()
+        corners_bottom = [QPointF(point.x() + offset_x, point.y() + offset_y) for point in corners_bottom]
+        height = max(18.0, min(120.0, pallet.estimated_height_mm * 0.06))
+        top = QPolygonF([QPointF(point.x(), point.y() - height) for point in corners_bottom])
+        bottom_index = max(range(4), key=lambda index: (corners_bottom[index].y(), corners_bottom[index].x()))
+        prev_index = (bottom_index - 1) % 4
+        next_index = (bottom_index + 1) % 4
+        face_a = QPolygonF([
+            corners_bottom[bottom_index],
+            corners_bottom[prev_index],
+            QPointF(corners_bottom[prev_index].x(), corners_bottom[prev_index].y() - height),
+            QPointF(corners_bottom[bottom_index].x(), corners_bottom[bottom_index].y() - height),
+        ])
+        face_b = QPolygonF([
+            corners_bottom[bottom_index],
+            corners_bottom[next_index],
+            QPointF(corners_bottom[next_index].x(), corners_bottom[next_index].y() - height),
+            QPointF(corners_bottom[bottom_index].x(), corners_bottom[bottom_index].y() - height),
+        ])
         color = pallet_color(pallet); active = pallet.pallet_number in {self.selected_pallet, self.hover_pallet}
-        painter.setPen(QPen(QColor("#a2e8ff") if active else QColor("#2b73b2"), 2 if active else 1)); painter.setBrush(QColor(color.darker(135))); painter.drawPolygon(left)
-        painter.setBrush(QColor(color.darker(118))); painter.drawPolygon(right); painter.setBrush(color); painter.drawPolygon(top)
-        painter.setPen(QColor("#daf5ff")); painter.setFont(QFont("Consolas", 7, QFont.Bold)); painter.drawText(QPointF(ox + 4, oy - height + 13), pallet.pallet_number)
-        painter.setFont(QFont("Yu Gothic UI", 6)); painter.drawText(QPointF(ox + 4, oy - height + 24), pallet.summary_text[:14])
-        return QRect(int(ox - 2), int(oy - height - depth), int(width + depth + 8), int(height + depth + 10))
+        fill = QColor(color)
+        fill.setAlpha(170)
+        painter.setPen(QPen(QColor("#a2e8ff") if active else QColor("#2b73b2"), 2 if active else 1))
+        painter.setBrush(fill); painter.drawPolygon(face_a)
+        painter.setBrush(fill); painter.drawPolygon(face_b)
+        painter.setBrush(fill); painter.drawPolygon(top)
+        label_anchor = min([QPointF(point.x(), point.y() - height) for point in corners_bottom], key=lambda point: point.y() + (point.x() * 0.02))
+        painter.setPen(QColor("#daf5ff")); painter.setFont(QFont("Consolas", 7, QFont.Bold)); painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 13), pallet.pallet_number)
+        painter.setFont(QFont("Yu Gothic UI", 6)); painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 24), pallet.summary_text[:14])
+        min_x = min(point.x() for point in corners_bottom)
+        max_x = max(point.x() for point in corners_bottom)
+        min_y = min(point.y() for point in corners_bottom) - height
+        max_y = max(point.y() for point in corners_bottom)
+        return QRect(int(min_x - 4), int(min_y - 4), int((max_x - min_x) + 10), int((max_y - min_y) + 10))
 
     def tooltip_text(self, pallet: PalletRecord) -> str:
         lines = [f"パレット: {pallet.pallet_number}", f"位置: {pallet.location_code} / {pallet.stack_label}", f"入庫日: {pallet.received_date or '-'}", f"向き: {orientation_label(pallet.orientation)}", f"色: {color_label(pallet.color_key)}", f"概算高: {pallet.estimated_height_mm}mm"]
@@ -1152,38 +1266,41 @@ class IsometricMapWidget(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing); painter.fillRect(self.rect(), QColor("#07111f")); self.pallet_rects.clear(); bounds = self.scaled_bounds(); self.draw_floor(painter, bounds)
-        locations = sorted(self.store.locations)
-        origin = QPointF(bounds.center().x(), bounds.center().y() + 8); step_x = min(72.0, bounds.width() / 14.0); step_y = min(34.0, bounds.height() / 16.0); points: Dict[str, QPointF] = {}
-        for location in locations:
-            grid_col, grid_row = location_to_grid(location)
-            point = self.project_grid_point(origin, float(grid_col), float(grid_row), step_x, step_y)
-            points[location] = point
-        stack_lift: Dict[str, float] = {}
-        for pallet in sorted(self.store.pallets, key=lambda p: (p.location_code, p.stack_group or p.pallet_number, p.stack_order, p.pallet_number)):
-            group_key = pallet.stack_group or pallet.pallet_number
-            if pallet.map_x is not None and pallet.map_y is not None:
-                grid_x = bounds.left() + bounds.width() * pallet.map_x
-                grid_y = bounds.top() + bounds.height() * pallet.map_y
-                gx = ((grid_x - bounds.left()) / max(bounds.width(), 1)) * 12.0
-                gy = ((grid_y - bounds.top()) / max(bounds.height(), 1)) * 12.0
-                base = self.project_grid_point(origin, gx, gy, step_x * 0.55, step_y * 0.58)
+        entrance_point = self.project_normalized_point(bounds, ENTRY_MAP_X, ENTRY_MAP_Y)
+        painter.setPen(QPen(QColor("#4fc3ff"), 2))
+        painter.setBrush(QColor(79, 195, 255, 60))
+        painter.drawEllipse(QPointF(entrance_point.x(), entrance_point.y()), 8, 8)
+        painter.drawLine(QPointF(entrance_point.x(), entrance_point.y()), QPointF(entrance_point.x(), entrance_point.y() + 26))
+        painter.setPen(QColor("#7fd0ff"))
+        painter.setFont(QFont("Yu Gothic UI", 8, QFont.Bold))
+        painter.drawText(QRect(int(entrance_point.x() - 46), int(entrance_point.y() + 28), 92, 18), Qt.AlignCenter, "入口")
+        groups: Dict[str, List[PalletRecord]] = {}
+        for pallet in self.store.pallets:
+            groups.setdefault(pallet.stack_group or pallet.pallet_number, []).append(pallet)
+        base_points: Dict[str, QPointF] = {}
+        for group_key, members in groups.items():
+            members.sort(key=lambda p: (p.stack_order, p.updated_at, p.pallet_number))
+            anchor = members[0]
+            if anchor.map_x is not None and anchor.map_y is not None:
+                base = self.project_normalized_point(bounds, anchor.map_x, anchor.map_y)
             else:
-                base = points.get(pallet.location_code)
-                if base is None:
-                    continue
-            lift = stack_lift.get(group_key, 0.0)
-            rect = self.draw_pallet(painter, pallet, QPointF(base.x(), base.y() - lift)); self.pallet_rects[pallet.pallet_number] = rect
-            stack_lift[group_key] = lift + max(18.0, min(120.0, pallet.estimated_height_mm * 0.06))
-        painter.setPen(QColor("#6d90b5")); painter.setFont(QFont("Yu Gothic UI", 9)); painter.drawText(bounds.adjusted(6, 6, -6, -6), Qt.AlignTop | Qt.AlignLeft, "45度ビュー")
+                nx, ny = self.location_normalized_point(anchor.location_code)
+                base = self.project_normalized_point(bounds, nx, ny)
+            lift = 0.0
+            for member in members:
+                base_points[member.pallet_number] = QPointF(base)
+                rect = self.draw_pallet(painter, member, QPointF(base.x(), base.y() - lift))
+                self.pallet_rects[member.pallet_number] = rect
+                lift += max(18.0, min(120.0, member.estimated_height_mm * 0.06))
+        if self.selected_pallet and self.selected_pallet in base_points:
+            selected_base = base_points[self.selected_pallet]
+            painter.setPen(QPen(QColor("#8fd8ff"), 1, Qt.DotLine))
+            painter.drawLine(entrance_point, selected_base)
+        view_names = {0: "入口手前", 1: "右側", 2: "奥側", 3: "左側"}
+        painter.setPen(QColor("#6d90b5")); painter.setFont(QFont("Yu Gothic UI", 9)); painter.drawText(bounds.adjusted(6, 6, -6, -6), Qt.AlignTop | Qt.AlignLeft, f"45度ビュー / {view_names.get(self.view_rotation % 4, '')}")
 
     def mouseMoveEvent(self, event) -> None:
         point = event.position().toPoint()
-        if self.orbiting:
-            delta = point.x() - self.orbit_anchor.x()
-            self.view_angle = max(0.35, min(1.25, self.view_angle + (delta * 0.0035)))
-            self.orbit_anchor = point
-            self.update()
-            return
         if self.panning:
             self.pan_offset += point - self.pan_anchor
             self.pan_anchor = point
@@ -1205,10 +1322,6 @@ class IsometricMapWidget(QWidget):
         self.setCursor(Qt.PointingHandCursor if hit else Qt.ArrowCursor); self.update()
 
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.RightButton:
-            self.orbiting = True
-            self.orbit_anchor = event.position().toPoint()
-            return
         if event.button() != Qt.LeftButton:
             return
         point = event.position().toPoint()
@@ -1217,14 +1330,10 @@ class IsometricMapWidget(QWidget):
                 self.selected_pallet = pallet_number; self.palletSelected.emit(pallet_number); self.update(); return
         self.selected_pallet = None
         self.selectionCleared.emit()
-        if self.zoom > 1.0:
-            self.panning = True
-            self.pan_anchor = point
+        self.panning = True
+        self.pan_anchor = point
 
     def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.RightButton:
-            self.orbiting = False
-            return
         self.panning = False
 
     def mouseDoubleClickEvent(self, event) -> None:
@@ -1252,6 +1361,18 @@ class IsometricMapWidget(QWidget):
 
     def reset_zoom(self) -> None:
         self.zoom = 1.0; self.pan_offset = QPoint(); self.update()
+
+    def rotate_view_90(self) -> None:
+        self.view_rotation = (self.view_rotation + 1) % 4
+        self.update()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        parent = self.parent()
+        while parent is not None and not isinstance(parent, MainWindow):
+            parent = parent.parent()
+        if isinstance(parent, MainWindow):
+            parent.apply_responsive_layout()
 
 
 class MainWindow(QMainWindow):
@@ -1327,7 +1448,12 @@ class MainWindow(QMainWindow):
         self.stack_detail_pages.installEventFilter(self)
         detail_layout.addWidget(self.stack_detail_pages, 1)
         self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.toggle_blocked_location); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
-        self.iso_map = IsometricMapWidget(self.store); self.iso_map.palletSelected.connect(self.select_pallet); self.iso_map.selectionCleared.connect(self.clear_selection); self.iso_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.tabs.addTab(self.wrap_widget(self.iso_map), "左下45°")
+        self.iso_map = IsometricMapWidget(self.store); self.iso_map.palletSelected.connect(self.select_pallet); self.iso_map.selectionCleared.connect(self.clear_selection); self.iso_map.palletDoubleClicked.connect(self.open_selected_pallet_editor)
+        self.iso_rotate_button = QPushButton("視点90°")
+        self.iso_rotate_button.setParent(self.iso_map)
+        self.iso_rotate_button.clicked.connect(self.rotate_iso_view)
+        self.iso_rotate_button.raise_()
+        self.tabs.addTab(self.wrap_widget(self.iso_map), "45度ビュー")
         self.inventory_table = QTableWidget(0, 12); self.inventory_table.setHorizontalHeaderLabels(["品名", "品番", "サイズ", "厚み", "加工 / 裏表", "グレード", "総枚数", "総高さ", "パレット数", "保管場所", "入庫日", "備考"])
         self.inventory_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch); self.inventory_table.horizontalHeader().setSectionResizeMode(10, QHeaderView.ResizeToContents); self.inventory_table.horizontalHeader().setSectionResizeMode(11, QHeaderView.Stretch); self.tabs.addTab(self.wrap_widget(self.inventory_table), "在庫一覧")
         self.inventory_table.horizontalHeader().sectionClicked.connect(self.handle_inventory_header_click)
@@ -1386,6 +1512,8 @@ class MainWindow(QMainWindow):
         self.copy_inventory_button.setVisible(is_inventory)
         self.restore_shipment_button.setVisible(is_shipment)
         self.delete_shipment_button.setVisible(is_shipment)
+        if hasattr(self, "iso_rotate_button"):
+            self.iso_rotate_button.setVisible(self.tabs.currentIndex() == 1)
         self.update_detail_overlay_geometry()
 
     def handle_stack_detail_tab_changed(self, _index: int) -> None:
@@ -1472,6 +1600,11 @@ class MainWindow(QMainWindow):
         self.delete_shipment_button.setMinimumHeight(combo_height)
         self.copy_inventory_button.setText("コピー" if compact else "一覧コピー")
         self.search_input.setPlaceholderText("検索" if narrow else "パレット番号 / 品番 / 加工 / ロケーション検索")
+        if hasattr(self, "iso_rotate_button") and hasattr(self, "iso_map"):
+            self.iso_rotate_button.setText("視点90°")
+            self.iso_rotate_button.setFixedHeight(30 if compact else 34)
+            self.iso_rotate_button.adjustSize()
+            self.iso_rotate_button.move(max(10, self.iso_map.width() - self.iso_rotate_button.width() - 14), 12)
         self.update_stack_detail_style()
 
     def update_detail_overlay_geometry(self) -> None:
@@ -1523,7 +1656,7 @@ class MainWindow(QMainWindow):
         self.update_detail_overlay_geometry()
 
     def apply_theme(self) -> None:
-        self.setStyleSheet("""QWidget { background:#091522; color:#e7f3ff; font:10pt 'Yu Gothic UI'; } QFrame { background:#0f1d2c; border:1px solid #163450; border-radius:8px; } QLineEdit, QComboBox, QSpinBox, QTableWidget { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:6px; } QPushButton { background:#1d5d99; color:white; border:none; border-radius:8px; padding:8px 14px; font-weight:600; } QPushButton:hover { background:#2675c2; } QPushButton:checked { background:#8f3d47; } QHeaderView::section { background:#11253d; color:#9dd9ff; border:none; padding:6px; } QTabWidget::pane { border:1px solid #1a3c60; background:#07111f; } QTabBar::tab { background:#11253d; color:#88c3f0; padding:10px 16px; margin-right:4px; border-top-left-radius:6px; border-top-right-radius:6px; } QTabBar::tab:selected { background:#1d5d99; color:white; }""")
+        self.setStyleSheet("""QWidget { background:#091522; color:#e7f3ff; font:10pt 'Yu Gothic UI'; } QFrame { background:#0f1d2c; border:1px solid #163450; border-radius:8px; } QLineEdit, QComboBox, QSpinBox, QAbstractSpinBox, QTableWidget { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:6px; } QPushButton { background:#1d5d99; color:white; border:none; border-radius:8px; padding:8px 14px; font-weight:600; } QPushButton:hover { background:#2675c2; } QPushButton:checked { background:#8f3d47; } QHeaderView::section { background:#11253d; color:#9dd9ff; border:none; padding:6px; } QTabWidget::pane { border:1px solid #1a3c60; background:#07111f; } QTabBar::tab { background:#11253d; color:#88c3f0; padding:10px 16px; margin-right:4px; border-top-left-radius:6px; border-top-right-radius:6px; } QTabBar::tab:selected { background:#1d5d99; color:white; }""")
 
     def set_blocked_edit_mode(self, enabled: bool) -> None:
         self.top_map.blocked_edit_mode = enabled
@@ -1589,7 +1722,7 @@ class MainWindow(QMainWindow):
         return 0.0 if base_area <= 0 else (used_area / base_area) * 100.0
 
     def refresh_inventory_table(self) -> None:
-        rows: Dict[Tuple[str, str, str, int, str, str, str], dict] = {}
+        rows: Dict[Tuple[str, str, str, str, str, str, str], dict] = {}
         for pallet in self.filtered_pallets():
             for item in pallet.items:
                 if not self.item_matches_keyword(item):
@@ -1607,7 +1740,7 @@ class MainWindow(QMainWindow):
             if sort_key == "identifier":
                 return (row["identifier"], row["part_code"], row["size"])
             if sort_key == "thickness":
-                return (row["thickness"], row["part_code"], row["size"])
+                return (parse_thickness_value(row["thickness"]), row["thickness"], row["part_code"], row["size"])
             if sort_key == "finish":
                 return (row["finish"], row["part_code"], row["size"])
             if sort_key == "grade":
@@ -1617,7 +1750,7 @@ class MainWindow(QMainWindow):
             if sort_key == "sheets":
                 return (row["sheets"], row["part_code"], row["size"])
             if sort_key == "size":
-                return (row["size"], row["part_code"], row["thickness"])
+                return (row["size"], row["part_code"], parse_thickness_value(row["thickness"]), row["thickness"])
             if sort_key == "pallets":
                 return (len(row["pallets"]), row["part_code"], row["size"])
             if sort_key == "locations":
@@ -1626,7 +1759,7 @@ class MainWindow(QMainWindow):
                 return (", ".join(sorted(row["received_dates"])), row["part_code"], row["size"])
             if sort_key == "note":
                 return (row["note"], row["part_code"], row["size"])
-            return (row["part_code"], row["size"], row["thickness"])
+            return (row["part_code"], row["size"], parse_thickness_value(row["thickness"]), row["thickness"])
 
         ordered = sorted(rows.values(), key=sort_value, reverse=reverse)
         self.inventory_table.setRowCount(len(ordered))
@@ -2051,6 +2184,10 @@ class MainWindow(QMainWindow):
     def reset_zoom_current_view(self) -> None:
         widget = self.current_zoom_widget();
         if hasattr(widget, "reset_zoom"): widget.reset_zoom()
+
+    def rotate_iso_view(self) -> None:
+        if hasattr(self, "iso_map"):
+            self.iso_map.rotate_view_90()
 
 
 def main() -> int:
