@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QAbstractSpinBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QToolTip, QVBoxLayout, QWidget
 
 if getattr(sys, "frozen", False):
@@ -28,13 +28,48 @@ COLOR_PRESETS = {
     "AUTO": ("自動", None),
     "BLUE": ("青", "#57C1FF"),
     "GREEN": ("緑", "#31D07C"),
+    "GRAY": ("その他", "#7A8EA6"),
     "RED": ("赤", "#FF6671"),
     "YELLOW": ("黄", "#FFC34D"),
     "PURPLE": ("紫", "#A785FF"),
     "ORANGE": ("橙", "#FF9D57"),
     "TEAL": ("青緑", "#3DD9C5"),
     "PINK": ("桃", "#FF7AC3"),
+    "NAVY": ("紺", "#3E5FCE"),
+    "LIME": ("黄緑", "#9AD93A"),
+    "BROWN": ("茶", "#B57A52"),
+    "WHITE": ("白", "#E8EEF5"),
+    "BLACK": ("黒", "#3B4652"),
+    "CYAN": ("水", "#67E8F9"),
+    "MAGENTA": ("紅", "#E85AD8"),
 }
+COLOR_CHOICE_LABELS = {
+    "AUTO": "自動",
+    "RED": "赤 [#38]",
+    "BLUE": "青 [#39]",
+    "GREEN": "緑 [#45]",
+    "PINK": "桃 [#50]",
+    "YELLOW": "黄 [#40]",
+    "PURPLE": "紫 [C/C]",
+    "GRAY": "その他 [混在 / その他]",
+    "ORANGE": "橙",
+    "TEAL": "青緑",
+    "NAVY": "紺",
+    "LIME": "黄緑",
+    "BROWN": "茶",
+    "WHITE": "白",
+    "BLACK": "黒",
+    "CYAN": "水",
+    "MAGENTA": "紅",
+}
+AUTO_PART_COLOR_RULES = {
+    "38": ("RED", "赤", "#FF6671"),
+    "39": ("BLUE", "青", "#57C1FF"),
+    "45": ("GREEN", "緑", "#31D07C"),
+    "50": ("PINK", "桃", "#FF7AC3"),
+    "40": ("YELLOW", "黄", "#FFC34D"),
+}
+AUTO_OTHER_COLOR = ("GRAY", "その他", "#7A8EA6")
 
 
 def column_label(index: int) -> str:
@@ -315,19 +350,88 @@ def color_label(color_key: str) -> str:
     return COLOR_PRESETS.get(color_key, COLOR_PRESETS["AUTO"])[0]
 
 
+def auto_color_key_for_items(items: List[InventoryItemLine]) -> str:
+    finishes = {(item.finish_text or "").strip().upper() for item in items}
+    if "C/C" in finishes:
+        return "PURPLE"
+    parts = {item.part_code.strip().upper() for item in items if item.part_code.strip()}
+    if len(parts) == 1:
+        part_code = next(iter(parts))
+        if part_code in AUTO_PART_COLOR_RULES:
+            return AUTO_PART_COLOR_RULES[part_code][0]
+    return AUTO_OTHER_COLOR[0]
+
+
+def auto_color_info(pallet: PalletRecord) -> Tuple[str, QColor]:
+    auto_key = auto_color_key_for_items(pallet.items)
+    if auto_key == "PURPLE":
+        return "C/C=紫", QColor(COLOR_PRESETS["PURPLE"][1])
+    parts = {item.part_code.strip().upper() for item in pallet.items if item.part_code.strip()}
+    if len(parts) == 1:
+        part_code = next(iter(parts))
+        if part_code in AUTO_PART_COLOR_RULES:
+            _, label, color = AUTO_PART_COLOR_RULES[part_code]
+            return f"#{part_code}={label}", QColor(color)
+    if len(parts) > 1:
+        _, label, color = AUTO_OTHER_COLOR
+        return f"混在={label}", QColor(color)
+    _, label, color = AUTO_OTHER_COLOR
+    return label, QColor(color)
+
+
+def pallet_color_text(pallet: PalletRecord) -> str:
+    if (pallet.color_key or "AUTO") != "AUTO":
+        return color_label(pallet.color_key)
+    auto_label, _ = auto_color_info(pallet)
+    return f"自動 / {auto_label}"
+
+
+def color_swatch_icon(color_key: str) -> QIcon:
+    color_value = COLOR_PRESETS.get(color_key, COLOR_PRESETS["AUTO"])[1] or "#7a8ea6"
+    pixmap = QPixmap(16, 16)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(QPen(QColor("#d7ecff"), 1))
+    painter.setBrush(QColor(color_value))
+    painter.drawRoundedRect(1, 1, 14, 14, 4, 4)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def populate_color_combo(combo: QComboBox, selected_key: Optional[str] = None, include_auto: bool = True) -> None:
+    combo.clear()
+    for key, (label, _) in COLOR_PRESETS.items():
+        if key == "AUTO" and not include_auto:
+            continue
+        combo.addItem(color_swatch_icon(key), COLOR_CHOICE_LABELS.get(key, label), key)
+    if selected_key is not None:
+        combo.setCurrentIndex(max(0, combo.findData(selected_key)))
+
+
 def pallet_color(pallet: PalletRecord) -> QColor:
     preset = COLOR_PRESETS.get(pallet.color_key or "AUTO", COLOR_PRESETS["AUTO"])[1]
     if preset:
         return QColor(preset)
-    sizes = {item.size.upper() for item in pallet.items}
-    if len(sizes) > 1:
-        return QColor("#FFC34D")
-    size = next(iter(sizes), "LL")
-    if size == "L":
-        return QColor("#57C1FF")
-    if size == "OL":
-        return QColor("#FF6671")
-    return QColor("#31D07C")
+    return auto_color_info(pallet)[1]
+
+
+def pallet_popup_text(pallet: PalletRecord) -> str:
+    lines = [f"パレット: {pallet.pallet_number}", "荷姿(上→下):"]
+    ordered_items = list(reversed(pallet.items))
+    lines.extend(f"- {item.identifier}" + (f" / {item.note}" if item.note else "") for item in ordered_items[:8])
+    if len(ordered_items) > 8:
+        lines.append(f"... 他{len(ordered_items) - 8}件")
+    lines.extend([
+        "",
+        "補足:",
+        f"位置: {pallet.location_code} / {pallet.stack_label}",
+        f"概算高: {pallet.estimated_height_mm}mm",
+        f"入庫日: {pallet.received_date or '-'}",
+        f"向き: {orientation_label(pallet.orientation)}",
+        f"色: {pallet_color_text(pallet)}",
+    ])
+    return "\n".join(lines)
 
 
 def footprint_mm(pallet: PalletRecord) -> Tuple[int, int]:
@@ -511,8 +615,7 @@ class RegistrationDialog(QDialog):
         self.received_date = QLineEdit(datetime.now().strftime("%Y-%m-%d"))
         self.orientation = QComboBox(); self.orientation.addItem("横向き", 0); self.orientation.addItem("縦向き", 90)
         self.color = QComboBox()
-        for key, (label, _) in COLOR_PRESETS.items():
-            self.color.addItem(label, key)
+        populate_color_combo(self.color, "AUTO", include_auto=True)
         form.addRow("パレット番号", self.pallet_number)
         form.addRow("入庫日", self.received_date)
         form.addRow("向き", self.orientation)
@@ -604,9 +707,8 @@ class EditPalletDialog(QDialog):
         self.location = QComboBox(); self.location.setEditable(True); self.location.addItems(sorted(locations)); self.location.setCurrentText(pallet.location_code)
         self.orientation = QComboBox(); self.orientation.addItem("横向き", 0); self.orientation.addItem("縦向き", 90); self.orientation.setCurrentIndex(1 if pallet.orientation % 180 == 90 else 0)
         self.color = QComboBox()
-        for key, (label, _) in COLOR_PRESETS.items():
-            self.color.addItem(label, key)
-        self.color.setCurrentIndex(max(0, self.color.findData(pallet.color_key or "AUTO")))
+        selected_color_key = pallet.color_key if (pallet.color_key or "AUTO") != "AUTO" else auto_color_key_for_items(pallet.items)
+        populate_color_combo(self.color, selected_color_key, include_auto=False)
         self.stack_order = QSpinBox(); self.stack_order.setRange(0, 999); self.stack_order.setValue(pallet.stack_order)
         form.addRow("パレット番号", self.pallet_number)
         form.addRow("入庫日", self.received_date)
@@ -933,18 +1035,13 @@ class TopMapWidget(QWidget):
         return map_x, map_y
 
     def tooltip_text(self, pallet: PalletRecord) -> str:
-        lines = [f"パレット: {pallet.pallet_number}", f"位置: {pallet.location_code} / {pallet.stack_label}", f"入庫日: {pallet.received_date or '-'}", f"向き: {orientation_label(pallet.orientation)}", f"色: {color_label(pallet.color_key)}", f"概算高: {pallet.estimated_height_mm}mm"]
-        ordered_items = list(reversed(pallet.items))
-        lines.append("荷姿(上→下):")
-        lines.extend(f"- {item.identifier}" + (f" / {item.note}" if item.note else "") for item in ordered_items[:8])
-        if len(ordered_items) > 8:
-            lines.append(f"... 他{len(ordered_items) - 8}件")
-        return "\n".join(lines)
+        return pallet_popup_text(pallet)
 
     def draw_pallet(self, painter: QPainter, pallet: PalletRecord, rect: QRect) -> None:
         active = pallet.pallet_number in {self.selected_pallet, self.hover_pallet, self.dragging_pallet}
         color = pallet_color(pallet); fill = QColor(color); fill.setAlpha(42)
-        painter.setBrush(fill); painter.setPen(QPen(QColor("#a8ecff") if active else color, 2 if active else 1))
+        outline = QColor(color.lighter(145) if active else color)
+        painter.setBrush(fill); painter.setPen(QPen(outline, 2 if active else 1))
         painter.drawRoundedRect(rect, 5, 5); painter.setPen(QColor("#dff6ff")); painter.setFont(QFont("Consolas", 8, QFont.Bold))
         painter.drawText(rect.adjusted(6, 4, -6, -6), Qt.AlignTop | Qt.AlignLeft, pallet.pallet_number)
         painter.setFont(QFont("Yu Gothic UI", 7)); painter.drawText(rect.adjusted(6, 18, -6, -6), Qt.AlignTop | Qt.AlignLeft, pallet.summary_text[:24])
@@ -1159,6 +1256,12 @@ class IsometricMapWidget(QWidget):
         half_h = bounds.height() * 0.24
         return origin, half_w, half_h
 
+    def vertical_height_scale(self, bounds: QRect) -> float:
+        _, half_w, half_h = self.floor_metrics(bounds)
+        width_scale = (half_w * 2.0) / 42000.0
+        depth_scale = (half_h * 2.0) / 28000.0
+        return min(width_scale, depth_scale)
+
     def rotated_normalized_point(self, nx: float, ny: float) -> Tuple[float, float]:
         rotation = self.view_rotation % 4
         if rotation == 1:
@@ -1222,7 +1325,7 @@ class IsometricMapWidget(QWidget):
         offset_x = base.x() - current_center.x()
         offset_y = base.y() - current_center.y()
         corners_bottom = [QPointF(point.x() + offset_x, point.y() + offset_y) for point in corners_bottom]
-        height = max(18.0, min(120.0, pallet.estimated_height_mm * 0.06))
+        height = max(20.0, min(240.0, pallet.estimated_height_mm * self.vertical_height_scale(bounds) * 2.3))
         top = QPolygonF([QPointF(point.x(), point.y() - height) for point in corners_bottom])
         bottom_index = max(range(4), key=lambda index: (corners_bottom[index].y(), corners_bottom[index].x()))
         prev_index = (bottom_index - 1) % 4
@@ -1242,7 +1345,8 @@ class IsometricMapWidget(QWidget):
         color = pallet_color(pallet); active = pallet.pallet_number in {self.selected_pallet, self.hover_pallet}
         fill = QColor(color)
         fill.setAlpha(170)
-        painter.setPen(QPen(QColor("#a2e8ff") if active else QColor("#2b73b2"), 2 if active else 1))
+        outline = QColor(color.lighter(145) if active else color.darker(115))
+        painter.setPen(QPen(outline, 2 if active else 1))
         painter.setBrush(fill); painter.drawPolygon(face_a)
         painter.setBrush(fill); painter.drawPolygon(face_b)
         painter.setBrush(fill); painter.drawPolygon(top)
@@ -1256,13 +1360,7 @@ class IsometricMapWidget(QWidget):
         return QRect(int(min_x - 4), int(min_y - 4), int((max_x - min_x) + 10), int((max_y - min_y) + 10))
 
     def tooltip_text(self, pallet: PalletRecord) -> str:
-        lines = [f"パレット: {pallet.pallet_number}", f"位置: {pallet.location_code} / {pallet.stack_label}", f"入庫日: {pallet.received_date or '-'}", f"向き: {orientation_label(pallet.orientation)}", f"色: {color_label(pallet.color_key)}", f"概算高: {pallet.estimated_height_mm}mm"]
-        ordered_items = list(reversed(pallet.items))
-        lines.append("荷姿(上→下):")
-        lines.extend(f"- {item.identifier}" + (f" / {item.note}" if item.note else "") for item in ordered_items[:8])
-        if len(ordered_items) > 8:
-            lines.append(f"... 他{len(ordered_items) - 8}件")
-        return "\n".join(lines)
+        return pallet_popup_text(pallet)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing); painter.fillRect(self.rect(), QColor("#07111f")); self.pallet_rects.clear(); bounds = self.scaled_bounds(); self.draw_floor(painter, bounds)
@@ -1291,7 +1389,7 @@ class IsometricMapWidget(QWidget):
                 base_points[member.pallet_number] = QPointF(base)
                 rect = self.draw_pallet(painter, member, QPointF(base.x(), base.y() - lift))
                 self.pallet_rects[member.pallet_number] = rect
-                lift += max(18.0, min(120.0, member.estimated_height_mm * 0.06))
+                lift += max(20.0, min(240.0, member.estimated_height_mm * self.vertical_height_scale(bounds) * 2.3))
         if self.selected_pallet and self.selected_pallet in base_points:
             selected_base = base_points[self.selected_pallet]
             painter.setPen(QPen(QColor("#8fd8ff"), 1, Qt.DotLine))
@@ -1730,8 +1828,9 @@ class MainWindow(QMainWindow):
                     pallet_haystacks = [pallet.pallet_number.lower(), pallet.location_code.lower(), pallet.received_date.lower(), color_label(pallet.color_key).lower()]
                     if pallet_tokens and not all(any(token in hay for hay in pallet_haystacks) for token in pallet_tokens):
                         continue
-                key = (item.identifier, item.part_code, item.size, item.thickness_mm, item.finish_text, item.grade, item.note)
-                row = rows.setdefault(key, {"identifier": item.identifier, "part_code": item.part_code, "size": item.size, "thickness": item.thickness_mm, "finish": item.finish_text, "grade": item.grade, "note": item.note, "sheets": 0, "height": 0, "pallets": set(), "locations": set(), "received_dates": set()})
+                thickness_text = str(item.thickness_mm)
+                key = (item.identifier, item.part_code, item.size, thickness_text, item.finish_text, item.grade, item.note)
+                row = rows.setdefault(key, {"identifier": item.identifier, "part_code": item.part_code, "size": item.size, "thickness": thickness_text, "finish": item.finish_text, "grade": item.grade, "note": item.note, "sheets": 0, "height": 0, "pallets": set(), "locations": set(), "received_dates": set()})
                 row["sheets"] += item.sheet_count; row["height"] += item.height_mm; row["pallets"].add(pallet.pallet_number); row["locations"].add(pallet.location_code); row["received_dates"].add(pallet.received_date or "-")
         sort_key = self.inventory_sort_key
         reverse = self.inventory_sort_desc
@@ -1975,6 +2074,7 @@ class MainWindow(QMainWindow):
         self.stack_detail_selector.setCurrentRow(current_index)
         self.stack_detail_selector.setVisible(self.stack_detail_selector.count() > 1)
         self.stack_detail_selector.blockSignals(False)
+        self.update_stack_detail_style()
         self.update_detail_overlay_geometry()
         self.detail_frame.show()
 
@@ -2148,6 +2248,8 @@ class MainWindow(QMainWindow):
         pallet_number, received_date, orientation, color_key, items = payload
         requested_number = pallet_number
         pallet_number = self.store.unique_pallet_number(pallet_number)
+        if color_key == "AUTO":
+            color_key = auto_color_key_for_items(items)
         location_code = ENTRY_LOCATION
         if location_code not in self.store.locations: self.store.locations.append(location_code)
         self.store.pallets.append(PalletRecord(pallet_number=pallet_number, location_code=location_code, received_date=received_date, color_key=color_key, stack_order=self.store.next_stack_order(location_code), stack_group=pallet_number, orientation=orientation, map_x=ENTRY_MAP_X, map_y=ENTRY_MAP_Y, items=items, updated_at=now_text()))
