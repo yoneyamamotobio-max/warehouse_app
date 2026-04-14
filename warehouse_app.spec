@@ -5,7 +5,7 @@ a = Analysis(
     ['warehouse_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.')],
+    datas=[],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

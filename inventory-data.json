@@ -401,7 +401,9 @@
     "S20",
     "T20"
   ],
-  "blocked_locations": [],
+  "blocked_locations": [
+    "C6"
+  ],
   "pallets": [
     {
       "pallet_number": "38651",
@@ -436,12 +438,12 @@
       "color_key": "ORANGE",
       "color_mode": "MANUAL",
       "last_manual_color_key": "ORANGE",
-      "stack_order": 0,
+      "stack_order": 1,
       "stack_group": "R080326",
       "orientation": 0,
       "map_x": 0.375,
       "map_y": 0.725,
-      "updated_at": "2026-04-10 16:33:44",
+      "updated_at": "2026-04-14 17:24:40",
       "items": [
         {
           "line_id": "1020d439ec0f4abe94aa67667653ef68",
@@ -470,7 +472,7 @@
           "thickness_mm": "3",
           "finish_text": "S/C",
           "grade": "A",
-          "sheet_count": 403,
+          "sheet_count": 353,
           "note": ""
         }
       ]
@@ -529,17 +531,17 @@
     },
     {
       "pallet_number": "1111111",
-      "location_code": "H16",
+      "location_code": "H15",
       "received_date": "2026-04-07",
       "color_key": "PURPLE",
       "color_mode": "MANUAL",
       "last_manual_color_key": "PURPLE",
       "stack_order": 0,
-      "stack_group": "1111111",
+      "stack_group": "R080326",
       "orientation": 0,
       "map_x": 0.375,
-      "map_y": 0.775,
-      "updated_at": "2026-04-10 16:32:20",
+      "map_y": 0.725,
+      "updated_at": "2026-04-14 17:24:50",
       "items": [
         {
           "line_id": "55e61a0427344cea8917a27fcf899569",
@@ -647,7 +649,7 @@
     },
     {
       "pallet_number": "R",
-      "location_code": "J20",
+      "location_code": "L7",
       "received_date": "2026-04-13",
       "color_key": "BLUE",
       "color_mode": "AUTO",
@@ -655,9 +657,9 @@
       "stack_order": 0,
       "stack_group": "R",
       "orientation": 0,
-      "map_x": 0.5,
-      "map_y": 0.95,
-      "updated_at": "2026-04-13 16:25:21",
+      "map_x": 0.575,
+      "map_y": 0.32499999999999996,
+      "updated_at": "2026-04-14 08:33:18",
       "items": [
         {
           "line_id": "d47cfd67d62d452b972b8941815fd18a",
@@ -667,6 +669,32 @@
           "finish_text": "S/S",
           "grade": "A",
           "sheet_count": 80,
+          "note": ""
+        }
+      ]
+    },
+    {
+      "pallet_number": "AAAA",
+      "location_code": "Q13",
+      "received_date": "",
+      "color_key": "GREEN",
+      "color_mode": "AUTO",
+      "last_manual_color_key": "GRAY",
+      "stack_order": 0,
+      "stack_group": "AAAA",
+      "orientation": 0,
+      "map_x": 0.825,
+      "map_y": 0.625,
+      "updated_at": "2026-04-14 08:33:17",
+      "items": [
+        {
+          "line_id": "a54b2c4348cd459599c2e9d72dcc259f",
+          "part_code": "45",
+          "size": "LL",
+          "thickness_mm": "3",
+          "finish_text": "S/C",
+          "grade": "A",
+          "sheet_count": 50,
           "note": ""
         }
       ]
