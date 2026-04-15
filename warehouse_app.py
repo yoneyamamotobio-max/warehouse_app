@@ -2155,6 +2155,7 @@ class MainWindow(QMainWindow):
         self.title_label = QLabel("大阪工場倉庫"); self.title_label.setStyleSheet("font:700 18px 'Yu Gothic UI'; color:#7fd0ff;")
         self.summary_label = QLabel(); self.summary_label.setStyleSheet("color:#89a4c2;"); self.summary_label.setWordWrap(True)
         self.new_button = QPushButton("新規登録"); self.new_button.clicked.connect(self.open_registration)
+        self.help_button = QPushButton("ヘルプ"); self.help_button.clicked.connect(self.open_help_tab)
         self.blocked_mode_button = QPushButton("置けないマス設定"); self.blocked_mode_button.setCheckable(True); self.blocked_mode_button.toggled.connect(self.set_blocked_edit_mode)
         self.edit_button = QPushButton("明細編集"); self.edit_button.clicked.connect(self.edit_selected_pallet)
         self.ship_button = QPushButton("出庫"); self.ship_button.clicked.connect(self.ship_selected_pallet)
@@ -2173,7 +2174,7 @@ class MainWindow(QMainWindow):
         self.export_button = QPushButton("Export"); self.export_button.clicked.connect(self.export_data)
         self.import_button = QPushButton("Import"); self.import_button.clicked.connect(self.import_data)
         self.clear_selection_button = QPushButton("選択解除"); self.clear_selection_button.clicked.connect(self.clear_selection)
-        self.action_buttons = [self.new_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_up_button, self.stack_down_button, self.rotate_button, self.zoom_in_button, self.zoom_out_button, self.zoom_reset_button, self.export_button, self.import_button]
+        self.action_buttons = [self.new_button, self.help_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_up_button, self.stack_down_button, self.rotate_button, self.zoom_in_button, self.zoom_out_button, self.zoom_reset_button, self.export_button, self.import_button]
         for button in self.action_buttons: button.setMinimumHeight(40)
         self.search_input.setMinimumHeight(40)
         self.copy_inventory_button.setMinimumHeight(40)
@@ -2184,6 +2185,7 @@ class MainWindow(QMainWindow):
         action_row.addStretch(1)
         action_row.addWidget(self.export_button)
         action_row.addWidget(self.import_button)
+        action_row.addWidget(self.help_button)
         utility_row = QHBoxLayout(); utility_row.addWidget(self.search_input, 1); utility_row.addWidget(self.copy_inventory_button); utility_row.addWidget(self.export_inventory_button); utility_row.addWidget(self.restore_shipment_button); utility_row.addWidget(self.delete_shipment_button)
         header_shell = QVBoxLayout(); header_shell.setSpacing(8); header_shell.addLayout(title_row); header_shell.addLayout(action_row); header_shell.addLayout(utility_row); root.addLayout(header_shell)
         self.map_container = QWidget(); root.addWidget(self.map_container, 1)
@@ -2223,10 +2225,56 @@ class MainWindow(QMainWindow):
         self.shipment_table = QTableWidget(0, 10); self.shipment_table.setHorizontalHeaderLabels(["出庫日", "パレット番号", "品名", "品数", "総枚数", "総高さ", "最終位置", "入庫日", "色", "備考"])
         self.shipment_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.shipment_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.shipment_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch); self.shipment_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch); self.tabs.addTab(self.wrap_widget(self.shipment_table), "出庫一覧")
+        self.help_page = self.build_help_page(); self.help_tab_widget = self.wrap_widget(self.help_page); self.tabs.addTab(self.help_tab_widget, "ヘルプ")
         self.update_tab_visuals()
         self.apply_responsive_layout()
         self.handle_tab_changed(self.tabs.currentIndex())
         self.update_detail_overlay_geometry()
+
+    def build_help_page(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        sections = [
+            ("基本操作", "1. 新規登録でパレット番号と明細を入力\n2. 明細を追加で一覧に入れる\n3. 真上ビューで入口から保管位置へドラッグ移動"),
+            ("位置変更", "真上ビューでパレットをドラッグすると移動できます。\n積み重ねたい時は他パレットへ近づけて置きます。"),
+            ("積み重ね", "列を解除は、一番上のパレットを1枚だけ外して入口へ戻します。\n段を上げる / 下げるは同じ列の上下順を入れ替えます。"),
+            ("置けないマス設定", "置けないマス設定を押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
+            ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\n厚みと枚数は行内の +/- で調整できます。"),
+            ("積み替え", "積み替えでは、既存パレットへの移動か空パレット作成を選べます。\n空パレットは入口に作成されます。"),
+            ("出庫と復元", "出庫したパレットは出庫一覧へ移ります。\n復元すると元位置ではなく入口へ戻ります。"),
+            ("色の見方", "自動判別は明細内容で色を決めます。\nC/Cのみは紫、#38は赤、#39は青、#45は緑、#50は桃、#40は黄、混在やその他はグレーです。"),
+            ("困った時", "位置が変なら真上ビューで確認してください。\nデータ共有は Export / Import を使います。\n読込エラー時は store-error.log を確認してください。"),
+        ]
+
+        title = QLabel("操作ヘルプ")
+        title.setStyleSheet("font:700 18px 'Yu Gothic UI'; color:#dff6ff;")
+        layout.addWidget(title)
+        for heading, text in sections:
+            card = QFrame()
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 10, 12, 10)
+            card_layout.setSpacing(6)
+            heading_label = QLabel(heading)
+            heading_label.setStyleSheet("font:700 12pt 'Yu Gothic UI'; color:#7fd0ff;")
+            body_label = QLabel(text)
+            body_label.setWordWrap(True)
+            body_label.setStyleSheet("color:#e7f3ff; line-height:1.5;")
+            card_layout.addWidget(heading_label)
+            card_layout.addWidget(body_label)
+            layout.addWidget(card)
+        layout.addStretch(1)
+        scroll.setWidget(body)
+        return scroll
+
+    def open_help_tab(self) -> None:
+        if hasattr(self, "tabs"):
+            self.tabs.setCurrentWidget(self.help_tab_widget)
 
     def wrap_widget(self, widget: QWidget) -> QWidget:
         shell = QWidget(); layout = QVBoxLayout(shell); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(widget); return shell
@@ -2273,12 +2321,15 @@ class MainWindow(QMainWindow):
         tab_bar = self.tabs.tabBar()
         inventory_color = QColor("#39d98a")
         shipment_color = QColor("#ff8a80")
+        help_color = QColor("#ffd37a")
         tab_bar.setTabTextColor(0, QColor("#88c3f0"))
         tab_bar.setTabTextColor(1, QColor("#88c3f0"))
         tab_bar.setTabTextColor(2, inventory_color)
         tab_bar.setTabTextColor(3, shipment_color)
+        tab_bar.setTabTextColor(4, help_color)
         self.tabs.setTabIcon(2, solid_circle_icon(inventory_color.name()))
         self.tabs.setTabIcon(3, solid_circle_icon(shipment_color.name()))
+        self.tabs.setTabIcon(4, solid_circle_icon(help_color.name()))
 
     def handle_tab_changed(self, _index: int) -> None:
         is_inventory = self.tabs.currentIndex() == 2
@@ -2360,6 +2411,7 @@ class MainWindow(QMainWindow):
         self.summary_label.setStyleSheet(f"color:#89a4c2; font:{'8.5pt' if compact else '10pt'} 'Yu Gothic UI';")
         text_map = {
             self.new_button: "新規" if compact else "新規登録",
+            self.help_button: "ヘルプ",
             self.blocked_mode_button: "禁止マス" if compact else "置けないマス設定",
             self.edit_button: "編集" if compact else "明細編集",
             self.ship_button: "出庫",
