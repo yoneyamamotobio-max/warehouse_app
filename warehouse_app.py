@@ -458,7 +458,7 @@ def color_label(color_key: str) -> str:
 
 def auto_color_key_for_items(items: List[InventoryItemLine]) -> str:
     finishes = {(item.finish_text or "").strip().upper() for item in items}
-    if "C/C" in finishes:
+    if finishes == {"C/C"}:
         return "PURPLE"
     parts = {item.part_code.strip().upper() for item in items if item.part_code.strip()}
     if len(parts) == 1:
@@ -470,7 +470,8 @@ def auto_color_key_for_items(items: List[InventoryItemLine]) -> str:
 
 def auto_color_info(pallet: PalletRecord) -> Tuple[str, QColor]:
     auto_key = auto_color_key_for_items(pallet.items)
-    if auto_key == "PURPLE":
+    finishes = {(item.finish_text or "").strip().upper() for item in pallet.items}
+    if auto_key == "PURPLE" and finishes == {"C/C"}:
         return "C/C=紫", QColor(COLOR_PRESETS["PURPLE"][1])
     parts = {item.part_code.strip().upper() for item in pallet.items if item.part_code.strip()}
     if len(parts) == 1:
@@ -487,7 +488,8 @@ def auto_color_info(pallet: PalletRecord) -> Tuple[str, QColor]:
 
 def auto_color_info_for_items(items: List[InventoryItemLine]) -> Tuple[str, QColor]:
     auto_key = auto_color_key_for_items(items)
-    if auto_key == "PURPLE":
+    finishes = {(item.finish_text or "").strip().upper() for item in items}
+    if auto_key == "PURPLE" and finishes == {"C/C"}:
         return "C/C = 紫", QColor(COLOR_PRESETS["PURPLE"][1])
     parts = {item.part_code.strip().upper() for item in items if item.part_code.strip()}
     if len(parts) == 1:
@@ -879,7 +881,7 @@ class RegistrationDialog(QDialog):
         grid.addWidget(QLabel("備考"), 5, 0)
         grid.addWidget(self.note, 6, 0, 1, 3)
         root.addWidget(box)
-        for widget in [self.part_code, self.finish]: widget.textChanged.connect(self.update_preview)
+        for widget in [self.part_code, self.finish, self.note]: widget.textChanged.connect(self.update_preview)
         self.size.currentTextChanged.connect(self.update_preview); self.grade.currentTextChanged.connect(self.update_preview)
         self.thickness.textChanged.connect(self.update_preview); self.sheet_count.valueChanged.connect(self.update_preview)
         self.update_preview()
@@ -890,6 +892,7 @@ class RegistrationDialog(QDialog):
         self.item_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.item_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.item_table.setMinimumHeight(180)
+        self.item_table.itemChanged.connect(lambda *_args: self.update_color_controls())
         root.addWidget(self.item_table, 1)
         if initial_payload is not None:
             self.pallet_number.setText(initial_payload[0])
@@ -914,25 +917,76 @@ class RegistrationDialog(QDialog):
         self.preview.setText(f"プレビュー: #{part}-{self.size.currentText()}{thickness} {finish} {grade} {self.sheet_count.value()}")
         self.update_color_controls()
 
-    def draft_items_for_color_preview(self) -> List[InventoryItemLine]:
-        draft_items = list(self.items)
+    def current_draft_item(self) -> Optional[InventoryItemLine]:
         part = normalize_part_code(self.part_code.text())
         thickness = normalize_thickness_input(self.thickness.text())
         finish = normalize_text(self.finish.text())
         grade = normalize_text(self.grade.currentText())
-        if part and thickness and finish and grade and is_valid_thickness(thickness):
-            draft_items.append(
+        quantity = self.sheet_count.value()
+        if not part or not thickness or not finish or not grade:
+            return None
+        if not is_valid_thickness(thickness):
+            return None
+        if quantity <= 0 or quantity > 600:
+            return None
+        return InventoryItemLine(
+            part_code=part,
+            size=self.size.currentText(),
+            thickness_mm=thickness,
+            finish_text=finish,
+            grade=grade,
+            sheet_count=quantity,
+            note=normalize_note(self.note.text()),
+        )
+
+    def line_signature(self, item: InventoryItemLine) -> Tuple[str, str, str, str, str, int, str]:
+        return (
+            item.part_code,
+            item.size,
+            item.thickness_mm,
+            item.finish_text,
+            item.grade,
+            item.sheet_count,
+            item.note,
+        )
+
+    def registered_items(self) -> List[InventoryItemLine]:
+        if not hasattr(self, "item_table"):
+            return list(self.items)
+        items: List[InventoryItemLine] = []
+        for row in range(self.item_table.rowCount()):
+            label_item = self.item_table.item(row, 0)
+            note_item = self.item_table.item(row, 2)
+            label = label_item.text() if label_item is not None else ""
+            note = note_item.text() if note_item is not None else ""
+            match = re.match(r"#(?P<part>.+?)-(?P<size>L|LL|EL|OL)(?P<thickness>.+?)\s+(?P<finish>.+?)\s+(?P<grade>.+?)\s+(?P<count>\d+)$", label.strip())
+            if not match:
+                continue
+            items.append(
                 InventoryItemLine(
-                    part_code=part,
-                    size=self.size.currentText(),
-                    thickness_mm=thickness,
-                    finish_text=finish,
-                    grade=grade,
-                    sheet_count=max(1, self.sheet_count.value()),
-                    note=normalize_note(self.note.text()),
+                    part_code=normalize_part_code(match.group("part")),
+                    size=normalize_text(match.group("size")).upper(),
+                    thickness_mm=normalize_thickness_input(match.group("thickness")),
+                    finish_text=normalize_text(match.group("finish")),
+                    grade=normalize_text(match.group("grade")),
+                    sheet_count=int(match.group("count")),
+                    note=normalize_note(note),
                 )
             )
-        return draft_items
+        return items
+
+    def items_with_current_draft(self) -> List[InventoryItemLine]:
+        output_items = list(self.items)
+        draft_item = self.current_draft_item()
+        if draft_item is None:
+            return output_items
+        if output_items and self.line_signature(draft_item) == self.line_signature(output_items[-1]):
+            return output_items
+        output_items.append(draft_item)
+        return output_items
+
+    def draft_items_for_color_preview(self) -> List[InventoryItemLine]:
+        return self.registered_items()
 
     def update_color_controls(self) -> None:
         preview_items = self.draft_items_for_color_preview()
@@ -946,16 +1000,14 @@ class RegistrationDialog(QDialog):
         self.manual_color_row.setVisible(self.color_manual.isChecked())
 
     def add_line(self) -> None:
-        part = normalize_part_code(self.part_code.text())
-        thickness = normalize_thickness_input(self.thickness.text())
-        finish = normalize_text(self.finish.text()); grade = normalize_text(self.grade.currentText())
-        if not part:
+        draft_item = self.current_draft_item()
+        if draft_item is None and not normalize_part_code(self.part_code.text()):
             QMessageBox.warning(self, "入力エラー", "品番を入力してください。")
             return
-        if not thickness or not finish or not grade:
+        if draft_item is None and (not normalize_thickness_input(self.thickness.text()) or not normalize_text(self.finish.text()) or not normalize_text(self.grade.currentText())):
             QMessageBox.warning(self, "入力エラー", "厚み、加工 / 裏表、グレードを入力してください。")
             return
-        if not is_valid_thickness(thickness):
+        if draft_item is None and not is_valid_thickness(normalize_thickness_input(self.thickness.text())):
             QMessageBox.warning(self, "入力エラー", "厚みは 0.3〜35mm で入力してください。")
             return
         if self.sheet_count.value() <= 0:
@@ -964,9 +1016,9 @@ class RegistrationDialog(QDialog):
         if self.sheet_count.value() > 600:
             QMessageBox.warning(self, "入力エラー", "枚数は 600 以下で入力してください。")
             return
-        note = normalize_note(self.note.text())
-        item = InventoryItemLine(part_code=part, size=self.size.currentText(), thickness_mm=thickness, finish_text=finish, grade=grade, sheet_count=self.sheet_count.value(), note=note)
-        self.items.append(item)
+        if draft_item is None:
+            return
+        item = draft_item
         row = self.item_table.rowCount(); self.item_table.insertRow(row)
         self.item_table.setItem(row, 0, QTableWidgetItem(item.identifier)); self.item_table.setItem(row, 1, QTableWidgetItem(str(item.height_mm))); self.item_table.setItem(row, 2, QTableWidgetItem(item.note))
         self.update_color_controls()
@@ -980,13 +1032,14 @@ class RegistrationDialog(QDialog):
         if not received_date:
             QMessageBox.warning(self, "入力エラー", "入庫日は YYYY-MM-DD 形式の実在する日付で、未来日は入力できません。")
             return None
-        if not self.items:
+        output_items = self.registered_items()
+        if not output_items:
             QMessageBox.warning(self, "入力エラー", "明細を1件以上追加してください。")
             return None
         self.received_date.setText(received_date)
         color_mode = "AUTO" if self.color_auto.isChecked() else "MANUAL"
         last_manual_color_key = str(self.color.currentData())
-        return pallet_number, received_date, int(self.orientation.currentData()), color_mode, last_manual_color_key, list(self.items)
+        return pallet_number, received_date, int(self.orientation.currentData()), color_mode, last_manual_color_key, output_items
 
     def accept(self) -> None:
         if self.payload() is None:
