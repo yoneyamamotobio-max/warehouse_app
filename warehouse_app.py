@@ -334,20 +334,30 @@ def read_store_file(path: Path) -> InventoryStore:
     return InventoryStore.from_dict(payload)
 
 
+class StoreRecoveryError(RuntimeError):
+    def __init__(self, message: str, paths: List[Path], log_path: Path) -> None:
+        super().__init__(message)
+        self.paths = paths
+        self.log_path = log_path
+
+
 def load_store(path: Path = DATA_PATH) -> InventoryStore:
     if not path.exists():
         store = InventoryStore()
         save_store(store, path)
         return store
     bak_path = path.with_suffix(path.suffix + ".bak")
+    failed_paths: List[Path] = []
 
     try:
         return read_store_file(path)
     except Exception:
         log_store_error(f"load failed: {path}\n{traceback.format_exc()}")
+        failed_paths.append(path)
         corrupt_path = path.with_name(f"{path.stem}-{datetime.now():%Y%m%d-%H%M%S}.corrupt{path.suffix}")
         try:
             path.replace(corrupt_path)
+            failed_paths.append(corrupt_path)
             log_store_error(f"corrupt store moved to: {corrupt_path}")
         except Exception:
             log_store_error(f"failed to move corrupt store: {path}\n{traceback.format_exc()}")
@@ -357,9 +367,36 @@ def load_store(path: Path = DATA_PATH) -> InventoryStore:
             return read_store_file(bak_path)
         except Exception:
             log_store_error(f"backup load failed: {bak_path}\n{traceback.format_exc()}")
+            failed_paths.append(bak_path)
+    else:
+        log_store_error(f"backup store not found: {bak_path}")
+        failed_paths.append(bak_path)
 
-    log_store_error("falling back to empty InventoryStore()")
-    return InventoryStore()
+    log_store_error("store recovery failed; startup stopped")
+    raise StoreRecoveryError("データ破損。復旧できません", failed_paths or [path, bak_path], STORE_LOG_PATH)
+
+
+def show_store_recovery_dialog(error: StoreRecoveryError) -> None:
+    dialog = QDialog()
+    dialog.setWindowTitle("データ復旧")
+    dialog.setMinimumWidth(620)
+    layout = QVBoxLayout(dialog)
+    title = QLabel("データ破損。復旧できません")
+    title.setStyleSheet("font:700 18px 'Yu Gothic UI'; color:#ff9b9b;")
+    layout.addWidget(title)
+    message = QLabel("本体データとバックアップのどちらも読み込めなかったため、空データでは起動しません。破損ファイルを確認して、手動で復旧してください。")
+    message.setWordWrap(True)
+    layout.addWidget(message)
+    path_text = "\n".join(str(p) for p in error.paths)
+    paths = QLabel(f"破損または読込失敗したファイル:\n{path_text}\n\nログ:\n{error.log_path}")
+    paths.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+    paths.setWordWrap(True)
+    paths.setStyleSheet("background:#0b1726; color:#d7ecff; border:1px solid #21466d; padding:10px;")
+    layout.addWidget(paths)
+    buttons = QDialogButtonBox(QDialogButtonBox.Close)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+    dialog.exec()
 
 
 def orientation_label(orientation: int) -> str:
@@ -577,7 +614,7 @@ def stack_position_label(store: "InventoryStore", pallet: PalletRecord) -> str:
 
 def pallet_popup_text(store: "InventoryStore", pallet: PalletRecord) -> str:
     lines = [f"パレット: {pallet.pallet_number}", "荷姿(上→下):"]
-    ordered_items = list(reversed(pallet.items))
+    ordered_items = pallet.items
     lines.extend(f"- {item.identifier}" + (f" / {item.note}" if item.note else "") for item in ordered_items[:8])
     if len(ordered_items) > 8:
         lines.append(f"... 他{len(ordered_items) - 8}件")
@@ -611,12 +648,26 @@ def thickness_values(thickness_text: str) -> List[float]:
     return [float(value) for value in re.findall(r"\d+(?:\.\d+)?", str(thickness_text or ""))]
 
 
+def is_single_thickness(thickness_text: str) -> bool:
+    text = normalize_thickness_input(thickness_text)
+    return re.fullmatch(r"\d+(?:\.\d+)?", text) is not None
+
+
+def is_thickness_range(thickness_text: str) -> bool:
+    text = normalize_thickness_input(thickness_text)
+    return re.fullmatch(r"\d+(?:\.\d+)?[-~〜]\d+(?:\.\d+)?", text) is not None
+
+
 def is_valid_thickness(thickness_text: str) -> bool:
     text = normalize_thickness_input(thickness_text)
-    if not text or text.startswith("-") or not re.fullmatch(r"\d+(?:\.\d+)?", text):
+    if not text or text.startswith("-"):
         return False
-    value = float(text)
-    return 0.3 <= value <= 35.0
+    values = thickness_values(text)
+    if is_single_thickness(text):
+        return len(values) == 1 and 0.3 <= values[0] <= 35.0
+    if is_thickness_range(text):
+        return len(values) == 2 and values[0] <= values[1] and all(0.3 <= value <= 35.0 for value in values)
+    return False
 
 
 def format_thickness_value(value: float) -> str:
@@ -757,7 +808,7 @@ class ThicknessSpinBox(QAbstractSpinBox):
         self.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.setAccelerated(True)
         self.lineEdit().setText(text)
-        self.lineEdit().textChanged.connect(self.textChanged.emit)
+        self.lineEdit().textChanged.connect(self._handle_text_changed)
 
     def text(self) -> str:
         return self.lineEdit().text()
@@ -765,10 +816,18 @@ class ThicknessSpinBox(QAbstractSpinBox):
     def setText(self, text: str) -> None:
         self.lineEdit().setText(text)
 
+    def _handle_text_changed(self, text: str) -> None:
+        self.textChanged.emit(text)
+        self.update()
+
     def stepEnabled(self) -> QAbstractSpinBox.StepEnabled:
+        if not is_single_thickness(self.text()):
+            return QAbstractSpinBox.StepNone
         return QAbstractSpinBox.StepUpEnabled | QAbstractSpinBox.StepDownEnabled
 
     def stepBy(self, steps: int) -> None:
+        if not is_single_thickness(self.text()):
+            return
         current = parse_thickness_value(self.text().strip())
         self.setText(format_thickness_value(current + steps))
 
@@ -898,8 +957,7 @@ class RegistrationDialog(QDialog):
             self.pallet_number.setText(initial_payload[0])
             self.orientation.setCurrentIndex(1 if initial_payload[2] % 180 == 90 else 0)
             for item in self.items:
-                row = self.item_table.rowCount(); self.item_table.insertRow(row)
-                self.item_table.setItem(row, 0, QTableWidgetItem(item.identifier)); self.item_table.setItem(row, 1, QTableWidgetItem(str(item.height_mm))); self.item_table.setItem(row, 2, QTableWidgetItem(item.note))
+                self.insert_item_row(item)
         self.color_auto.setChecked(initial_color_mode == "AUTO")
         self.color_manual.setChecked(initial_color_mode != "AUTO")
         self.color_auto.toggled.connect(self.update_color_controls)
@@ -939,51 +997,29 @@ class RegistrationDialog(QDialog):
             note=normalize_note(self.note.text()),
         )
 
-    def line_signature(self, item: InventoryItemLine) -> Tuple[str, str, str, str, str, int, str]:
-        return (
-            item.part_code,
-            item.size,
-            item.thickness_mm,
-            item.finish_text,
-            item.grade,
-            item.sheet_count,
-            item.note,
-        )
+    def item_table_cell(self, text: str, item: InventoryItemLine) -> QTableWidgetItem:
+        cell = QTableWidgetItem(text)
+        cell.setData(Qt.UserRole, item)
+        cell.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        return cell
+
+    def insert_item_row(self, item: InventoryItemLine) -> None:
+        row = self.item_table.rowCount()
+        self.item_table.insertRow(row)
+        self.item_table.setItem(row, 0, self.item_table_cell(item.identifier, item))
+        self.item_table.setItem(row, 1, self.item_table_cell(str(item.height_mm), item))
+        self.item_table.setItem(row, 2, self.item_table_cell(item.note, item))
 
     def registered_items(self) -> List[InventoryItemLine]:
         if not hasattr(self, "item_table"):
             return list(self.items)
         items: List[InventoryItemLine] = []
         for row in range(self.item_table.rowCount()):
-            label_item = self.item_table.item(row, 0)
-            note_item = self.item_table.item(row, 2)
-            label = label_item.text() if label_item is not None else ""
-            note = note_item.text() if note_item is not None else ""
-            match = re.match(r"#(?P<part>.+?)-(?P<size>L|LL|EL|OL)(?P<thickness>.+?)\s+(?P<finish>.+?)\s+(?P<grade>.+?)\s+(?P<count>\d+)$", label.strip())
-            if not match:
-                continue
-            items.append(
-                InventoryItemLine(
-                    part_code=normalize_part_code(match.group("part")),
-                    size=normalize_text(match.group("size")).upper(),
-                    thickness_mm=normalize_thickness_input(match.group("thickness")),
-                    finish_text=normalize_text(match.group("finish")),
-                    grade=normalize_text(match.group("grade")),
-                    sheet_count=int(match.group("count")),
-                    note=normalize_note(note),
-                )
-            )
+            row_item = self.item_table.item(row, 0)
+            stored_item = row_item.data(Qt.UserRole) if row_item is not None else None
+            if isinstance(stored_item, InventoryItemLine):
+                items.append(stored_item)
         return items
-
-    def items_with_current_draft(self) -> List[InventoryItemLine]:
-        output_items = list(self.items)
-        draft_item = self.current_draft_item()
-        if draft_item is None:
-            return output_items
-        if output_items and self.line_signature(draft_item) == self.line_signature(output_items[-1]):
-            return output_items
-        output_items.append(draft_item)
-        return output_items
 
     def draft_items_for_color_preview(self) -> List[InventoryItemLine]:
         return self.registered_items()
@@ -1008,7 +1044,7 @@ class RegistrationDialog(QDialog):
             QMessageBox.warning(self, "入力エラー", "厚み、加工 / 裏表、グレードを入力してください。")
             return
         if draft_item is None and not is_valid_thickness(normalize_thickness_input(self.thickness.text())):
-            QMessageBox.warning(self, "入力エラー", "厚みは 0.3〜35mm で入力してください。")
+            QMessageBox.warning(self, "入力エラー", "厚みは 0.3〜35mm の単一値、または 3-3.5 / 3~3.5 の形式で入力してください。")
             return
         if self.sheet_count.value() <= 0:
             QMessageBox.warning(self, "入力エラー", "枚数は 1 以上で入力してください。")
@@ -1018,9 +1054,7 @@ class RegistrationDialog(QDialog):
             return
         if draft_item is None:
             return
-        item = draft_item
-        row = self.item_table.rowCount(); self.item_table.insertRow(row)
-        self.item_table.setItem(row, 0, QTableWidgetItem(item.identifier)); self.item_table.setItem(row, 1, QTableWidgetItem(str(item.height_mm))); self.item_table.setItem(row, 2, QTableWidgetItem(item.note))
+        self.insert_item_row(draft_item)
         self.update_color_controls()
 
     def payload(self) -> Optional[Tuple[str, str, int, str, str, List[InventoryItemLine]]]:
@@ -1136,7 +1170,7 @@ class EditPalletDialog(QDialog):
         action_row.addWidget(add_button); action_row.addWidget(remove_button); action_row.addStretch(1)
         root.addLayout(action_row)
 
-        for item in reversed(source_items):
+        for item in source_items:
             self.add_row(item)
         self.refresh_item_order_labels()
         self.color_auto.setChecked(source_color_mode == "AUTO")
@@ -1144,7 +1178,7 @@ class EditPalletDialog(QDialog):
         self.color_auto.toggled.connect(self.update_color_controls)
         self.color_manual.toggled.connect(self.update_color_controls)
         self.color.currentIndexChanged.connect(self.update_color_controls)
-        self.item_table.itemChanged.connect(lambda *_args: self.update_color_controls())
+        self.item_table.itemChanged.connect(self.handle_item_table_item_changed)
         self.update_color_controls()
         if self.item_table.rowCount() > 0:
             self.item_table.setCurrentCell(0, self.PART_COL)
@@ -1181,6 +1215,25 @@ class EditPalletDialog(QDialog):
                 button_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 button_item.setBackground(QColor("#12304d"))
                 button_item.setForeground(QColor("#dff6ff"))
+            self.refresh_thickness_step_buttons(row)
+
+    def refresh_thickness_step_buttons(self, row: int) -> None:
+        enabled = is_single_thickness(self.cell_text(row, self.THICKNESS_COL))
+        for col in [self.THICKNESS_DOWN_COL, self.THICKNESS_UP_COL]:
+            button_item = self.item_table.item(row, col)
+            if button_item is None:
+                continue
+            flags = Qt.ItemIsSelectable
+            if enabled:
+                flags |= Qt.ItemIsEnabled
+            button_item.setFlags(flags)
+            button_item.setBackground(QColor("#12304d" if enabled else "#263142"))
+            button_item.setForeground(QColor("#dff6ff" if enabled else "#75879b"))
+
+    def handle_item_table_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() == self.THICKNESS_COL:
+            self.refresh_thickness_step_buttons(item.row())
+        self.update_color_controls()
 
     def cell_text(self, row: int, col: int) -> str:
         item = self.item_table.item(row, col)
@@ -1198,6 +1251,8 @@ class EditPalletDialog(QDialog):
         if row < 0 or row >= self.item_table.rowCount():
             return
         current = self.cell_text(row, self.THICKNESS_COL) or "10"
+        if not is_single_thickness(current):
+            return
         next_value = format_thickness_value(parse_thickness_value(current) + delta)
         self.set_cell_text(row, self.THICKNESS_COL, next_value)
         self.update_color_controls()
@@ -1242,7 +1297,7 @@ class EditPalletDialog(QDialog):
             if sheet_count_value <= 0 or sheet_count_value > 600 or not is_valid_thickness(thickness):
                 continue
             items.append(InventoryItemLine(part_code=part_code, size=size, thickness_mm=thickness, finish_text=finish_text, grade=grade, sheet_count=sheet_count_value, note=normalize_note(note)))
-        return list(reversed(items))
+        return items
 
     def update_color_controls(self) -> None:
         preview_items = self.draft_items_for_color_preview()
@@ -1299,7 +1354,7 @@ class EditPalletDialog(QDialog):
             QMessageBox.warning(self, "入力エラー", "入庫日は YYYY-MM-DD 形式の実在する日付で、未来日は入力できません。")
             return None
 
-        display_items: List[InventoryItemLine] = []
+        items: List[InventoryItemLine] = []
         for row in range(self.item_table.rowCount()):
             original_note = self.cell_text(row, self.NOTE_COL)
             part_code = normalize_part_code(self.cell_text(row, self.PART_COL))
@@ -1332,7 +1387,7 @@ class EditPalletDialog(QDialog):
                 QMessageBox.warning(self, "入力エラー", f"{row + 1}行目の厚み、加工 / 裏表、グレードを入力してください。")
                 return None
             if not is_valid_thickness(thickness):
-                QMessageBox.warning(self, "入力エラー", f"{row + 1}行目の厚みは 0.3〜35mm で入力してください。")
+                QMessageBox.warning(self, "入力エラー", f"{row + 1}行目の厚みは 0.3〜35mm の単一値、または 3-3.5 / 3~3.5 の形式で入力してください。")
                 return None
             if not grade:
                 QMessageBox.warning(self, "入力エラー", f"{row + 1}行目のグレードを入力してください。")
@@ -1343,9 +1398,7 @@ class EditPalletDialog(QDialog):
             if len(note) > 20:
                 QMessageBox.warning(self, "入力エラー", f"{row + 1}行目の備考は20文字以内で入力してください。")
                 return None
-            display_items.append(InventoryItemLine(part_code=part_code, size=size.upper(), thickness_mm=thickness, finish_text=finish_text, grade=grade, sheet_count=sheet_count_value, note=note))
-
-        items = list(reversed(display_items))
+            items.append(InventoryItemLine(part_code=part_code, size=size.upper(), thickness_mm=thickness, finish_text=finish_text, grade=grade, sheet_count=sheet_count_value, note=note))
 
         if not items:
             QMessageBox.warning(self, "入力エラー", "明細を1件以上入力してください。")
@@ -1376,7 +1429,7 @@ class TransferDialog(QDialog):
         form = QFormLayout()
         self.form = form
         self.source_line = QComboBox()
-        for item in reversed(source_pallet.items):
+        for item in source_pallet.items:
             label = item.identifier + (f" / 備考: {item.note}" if item.note else "")
             self.source_line.addItem(label, item.line_id)
         self.target_pallet = QComboBox()
@@ -1947,6 +2000,9 @@ class IsometricMapWidget(QWidget):
 
     def draw_pallet(self, painter: QPainter, pallet: PalletRecord, base: QPointF) -> QRect:
         width_mm, depth_mm = footprint_mm(pallet)
+        if pallet.orientation % 180 == 90:
+            width_mm *= 0.8
+            depth_mm *= 0.8
         total_width_mm = 42000.0
         total_depth_mm = 28000.0
         width_norm = max(0.012, width_mm / total_width_mm)
@@ -2036,6 +2092,7 @@ class IsometricMapWidget(QWidget):
         for pallet in self.store.pallets:
             groups.setdefault(pallet.stack_group or pallet.pallet_number, []).append(pallet)
         base_points: Dict[str, QPointF] = {}
+        group_entries: List[Tuple[float, float, str, List[PalletRecord], QPointF]] = []
         for group_key, members in groups.items():
             members.sort(key=lambda p: (p.stack_order, p.updated_at, p.pallet_number))
             anchor = members[0]
@@ -2044,6 +2101,10 @@ class IsometricMapWidget(QWidget):
             else:
                 nx, ny = self.location_normalized_point(anchor.location_code)
                 base = self.project_normalized_point(bounds, nx, ny)
+            group_entries.append((base.y(), base.x(), group_key, members, base))
+
+        group_entries.sort(key=lambda entry: (entry[0], entry[1]))
+        for _depth_y, _depth_x, _group_key, members, base in group_entries:
             lift = 0.0
             for member in members:
                 base_points[member.pallet_number] = QPointF(base)
@@ -2907,6 +2968,7 @@ class MainWindow(QMainWindow):
             page = self.stack_detail_pages.widget(0)
             self.stack_detail_pages.removeWidget(page)
             page.deleteLater()
+        # パレット積み列は内部の下→上順を、表示だけ上→下に変換する。
         members = list(reversed(self.store.group_members(pallet)))
         current_index = 0
         for index, member in enumerate(members):
@@ -3111,27 +3173,6 @@ class MainWindow(QMainWindow):
             return
         self.open_selected_pallet_editor(pallet.pallet_number)
 
-    def confirm_duplicate_pallet_number(self, requested_number: str, ignore: Optional[str] = None, title: str = "同名あり") -> Tuple[str, str]:
-        resolved_number = self.store.unique_pallet_number(requested_number, ignore=ignore)
-        if resolved_number == requested_number:
-            return "ok", requested_number
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle(title)
-        box.setText(f"同名あり: {requested_number}")
-        box.setInformativeText("同じパレット番号が既に存在します。入力し直すか、連番で登録してください。")
-        retry_button = box.addButton("入力し直す", QMessageBox.ActionRole)
-        rename_button = box.addButton(f"連番で登録 ({resolved_number})", QMessageBox.AcceptRole)
-        cancel_button = box.addButton(QMessageBox.Cancel)
-        box.setDefaultButton(retry_button)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked == rename_button:
-            return "ok", resolved_number
-        if clicked == retry_button:
-            return "retry", requested_number
-        return "cancel", requested_number
-
     def open_selected_pallet_editor(self, pallet_number: str) -> None:
         if pallet_number:
             self.current_pallet_number = pallet_number
@@ -3307,7 +3348,11 @@ def main() -> int:
     app = QApplication(sys.argv)
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
-    window = MainWindow()
+    try:
+        window = MainWindow()
+    except StoreRecoveryError as error:
+        show_store_recovery_dialog(error)
+        return 1
     if ICON_PATH.exists():
         window.setWindowIcon(QIcon(str(ICON_PATH)))
     window.show()

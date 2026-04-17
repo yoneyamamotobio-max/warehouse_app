@@ -407,7 +407,7 @@
   "pallets": [
     {
       "pallet_number": "38651",
-      "location_code": "L16",
+      "location_code": "K17",
       "received_date": "",
       "color_key": "BLUE",
       "color_mode": "AUTO",
@@ -415,9 +415,9 @@
       "stack_order": 0,
       "stack_group": "38651",
       "orientation": 0,
-      "map_x": 0.575,
-      "map_y": 0.775,
-      "updated_at": "2026-04-10 16:33:20",
+      "map_x": 0.525,
+      "map_y": 0.825,
+      "updated_at": "2026-04-17 16:34:19",
       "items": [
         {
           "line_id": "f1d3d815f6534a23b4041e1aba0484da",
@@ -438,12 +438,12 @@
       "color_key": "ORANGE",
       "color_mode": "MANUAL",
       "last_manual_color_key": "ORANGE",
-      "stack_order": 1,
+      "stack_order": 0,
       "stack_group": "R080326",
       "orientation": 0,
       "map_x": 0.375,
       "map_y": 0.725,
-      "updated_at": "2026-04-14 17:24:40",
+      "updated_at": "2026-04-17 16:32:57",
       "items": [
         {
           "line_id": "1020d439ec0f4abe94aa67667653ef68",
@@ -486,10 +486,10 @@
       "last_manual_color_key": "TEAL",
       "stack_order": 0,
       "stack_group": "R060507",
-      "orientation": 0,
+      "orientation": 90,
       "map_x": 0.325,
       "map_y": 0.575,
-      "updated_at": "2026-04-10 16:45:51",
+      "updated_at": "2026-04-16 15:58:04",
       "items": [
         {
           "line_id": "811c6d35e09d41eaa24d5990cccad2e1",
@@ -515,7 +515,7 @@
       "orientation": 0,
       "map_x": 0.275,
       "map_y": 0.325,
-      "updated_at": "2026-04-10 16:45:44",
+      "updated_at": "2026-04-17 16:33:03",
       "items": [
         {
           "line_id": "918f6b4b368a4714931030040ea41f47",
@@ -531,17 +531,17 @@
     },
     {
       "pallet_number": "1111111",
-      "location_code": "H15",
+      "location_code": "I11",
       "received_date": "2026-04-07",
       "color_key": "PURPLE",
       "color_mode": "MANUAL",
       "last_manual_color_key": "PURPLE",
       "stack_order": 0,
-      "stack_group": "R080326",
+      "stack_group": "1111111",
       "orientation": 0,
-      "map_x": 0.375,
-      "map_y": 0.725,
-      "updated_at": "2026-04-14 17:24:50",
+      "map_x": 0.425,
+      "map_y": 0.525,
+      "updated_at": "2026-04-17 16:33:00",
       "items": [
         {
           "line_id": "55e61a0427344cea8917a27fcf899569",
@@ -585,7 +585,7 @@
       "pallet_number": "R040303",
       "location_code": "I12",
       "received_date": "",
-      "color_key": "PURPLE",
+      "color_key": "GRAY",
       "color_mode": "AUTO",
       "last_manual_color_key": "PURPLE",
       "stack_order": 0,
@@ -593,7 +593,7 @@
       "orientation": 0,
       "map_x": 0.425,
       "map_y": 0.575,
-      "updated_at": "2026-04-10 16:45:48",
+      "updated_at": "2026-04-16 16:00:17",
       "items": [
         {
           "line_id": "077e8d75524148e5b027d7bcfb14fd44",
@@ -685,7 +685,7 @@
       "orientation": 0,
       "map_x": 0.825,
       "map_y": 0.625,
-      "updated_at": "2026-04-14 08:33:17",
+      "updated_at": "2026-04-17 16:33:21",
       "items": [
         {
           "line_id": "a54b2c4348cd459599c2e9d72dcc259f",
@@ -789,23 +789,23 @@
     },
     {
       "pallet_number": "4534",
-      "location_code": "L18",
+      "location_code": "K17",
       "received_date": "2026-04-15",
       "color_key": "RED",
       "color_mode": "AUTO",
       "last_manual_color_key": "GRAY",
-      "stack_order": 0,
-      "stack_group": "4534",
-      "orientation": 0,
-      "map_x": 0.575,
-      "map_y": 0.875,
-      "updated_at": "2026-04-15 15:52:24",
+      "stack_order": 1,
+      "stack_group": "38651",
+      "orientation": 90,
+      "map_x": 0.525,
+      "map_y": 0.825,
+      "updated_at": "2026-04-17 16:34:24",
       "items": [
         {
-          "line_id": "00938b8a6e264b8e973e9dd0e5226370",
+          "line_id": "89f5abe1655c4670b2522d3601b042d3",
           "part_code": "38",
-          "size": "L",
-          "thickness_mm": "L10",
+          "size": "LL",
+          "thickness_mm": "10",
           "finish_text": "S/S",
           "grade": "A",
           "sheet_count": 80,
@@ -815,7 +815,7 @@
     },
     {
       "pallet_number": "444",
-      "location_code": "J20",
+      "location_code": "H5",
       "received_date": "2026-04-15",
       "color_key": "RED",
       "color_mode": "AUTO",
@@ -823,9 +823,9 @@
       "stack_order": 0,
       "stack_group": "444",
       "orientation": 0,
-      "map_x": 0.5,
-      "map_y": 0.95,
-      "updated_at": "2026-04-15 15:55:22",
+      "map_x": 0.375,
+      "map_y": 0.22499999999999998,
+      "updated_at": "2026-04-15 15:55:27",
       "items": [
         {
           "line_id": "d84243dd7f0849a3b62887015290e83b",
