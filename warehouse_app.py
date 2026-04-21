@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import sys
 import ctypes
 import traceback
@@ -90,6 +92,10 @@ DEFAULT_LOCATIONS = [f"{column_label(col)}{row}" for row in range(1, GRID_ROWS +
 ENTRY_LOCATION = f"{column_label((GRID_COLUMNS // 2) - 1)}{GRID_ROWS}"
 ENTRY_MAP_X = 0.5
 ENTRY_MAP_Y = 0.95
+ENTRY_WAITING_SLOTS: List[Tuple[float, float]] = [
+    (0.50, 1.08), (0.42, 1.08), (0.58, 1.08), (0.34, 1.08), (0.66, 1.08),
+]
+ENTRY_WAITING_TOLERANCE = 0.035
 
 
 def now_text() -> str:
@@ -125,7 +131,6 @@ class PalletRecord:
     color_mode: str = "AUTO"
     last_manual_color_key: str = "GRAY"
     stack_order: int = 0
-    stack_group: Optional[str] = None
     orientation: int = 0
     map_x: Optional[float] = None
     map_y: Optional[float] = None
@@ -205,27 +210,63 @@ class InventoryStore:
             if location not in self.locations:
                 self.locations.append(location)
 
-    def ensure_stack_groups(self) -> None:
-        for pallet in self.pallets:
-            if not pallet.stack_group:
-                pallet.stack_group = pallet.pallet_number
+    def is_entry_waiting_pallet(self, pallet: PalletRecord) -> bool:
+        return normalize_location_code(pallet.location_code) == ENTRY_LOCATION and pallet.map_y is not None and pallet.map_y > 1.0
+
+    def has_pallet_at_location(self, location_code: str) -> bool:
+        location_code = normalize_location_code(location_code)
+        return any(normalize_location_code(pallet.location_code) == location_code for pallet in self.pallets)
+
+    def set_blocked_location_with_validation(self, location_code: str, blocked: bool) -> bool:
+        raw_location = str(location_code or "").strip()
+        if not raw_location:
+            return False
+        location_code = normalize_location_code(raw_location)
+        if blocked and self.has_pallet_at_location(location_code):
+            raise ValueError(f"{location_code} には既にパレットがあるため、置けないマスにはできません。")
+
+        changed = False
+        if blocked:
+            if location_code not in self.blocked_locations:
+                self.blocked_locations.append(location_code)
+                changed = True
+        else:
+            before = len(self.blocked_locations)
+            self.blocked_locations = [code for code in self.blocked_locations if normalize_location_code(code) != location_code]
+            changed = len(self.blocked_locations) != before
+        self.blocked_locations = sorted({normalize_location_code(code) for code in self.blocked_locations}, key=lambda code: location_to_grid(code))
+        return changed
+
+    def restore_blocked_locations_with_validation(self, locations: List[str]) -> None:
+        self.blocked_locations = []
+        for location in locations:
+            try:
+                self.set_blocked_location_with_validation(location, True)
+            except ValueError:
+                continue
 
     def normalize_stacks(self) -> None:
-        groups: Dict[Tuple[str, str], List[PalletRecord]] = {}
+        groups: Dict[str, List[PalletRecord]] = {}
         for pallet in self.pallets:
-            groups.setdefault((pallet.location_code, pallet.stack_group or pallet.pallet_number), []).append(pallet)
+            if self.is_entry_waiting_pallet(pallet):
+                pallet.stack_order = 0
+                continue
+            groups.setdefault(normalize_location_code(pallet.location_code), []).append(pallet)
         for pallets in groups.values():
             pallets.sort(key=lambda p: (p.stack_order, p.updated_at, p.pallet_number))
             for index, pallet in enumerate(pallets):
                 pallet.stack_order = index
 
     def next_stack_order(self, location_code: str, ignore: Optional[str] = None) -> int:
-        values = [p.stack_order for p in self.pallets if p.location_code == location_code and p.pallet_number != ignore]
+        location_code = normalize_location_code(location_code)
+        values = [p.stack_order for p in self.pallets if normalize_location_code(p.location_code) == location_code and p.pallet_number != ignore and not self.is_entry_waiting_pallet(p)]
         return max(values) + 1 if values else 0
 
     def group_members(self, pallet: PalletRecord) -> List[PalletRecord]:
-        key = pallet.stack_group or pallet.pallet_number
-        members = [item for item in self.pallets if (item.stack_group or item.pallet_number) == key]
+        if self.is_entry_waiting_pallet(pallet):
+            return [pallet]
+        location_code = normalize_location_code(pallet.location_code)
+        members = [item for item in self.pallets if normalize_location_code(item.location_code) == location_code and not self.is_entry_waiting_pallet(item)]
         members.sort(key=lambda item: (item.stack_order, item.updated_at, item.pallet_number))
         return members
 
@@ -258,7 +299,6 @@ class InventoryStore:
                     "color_mode": p.color_mode,
                     "last_manual_color_key": p.last_manual_color_key,
                     "stack_order": p.stack_order,
-                    "stack_group": p.stack_group,
                     "orientation": p.orientation,
                     "map_x": p.map_x,
                     "map_y": p.map_y,
@@ -289,15 +329,19 @@ class InventoryStore:
     @classmethod
     def from_dict(cls, payload: dict) -> "InventoryStore":
         store = cls()
-        store.locations = list(DEFAULT_LOCATIONS)
-        store.blocked_locations = [normalize_location_code(code) for code in payload.get("blocked_locations", [])]
+        store.locations = []
+        for code in payload.get("locations", []):
+            location = normalize_location_code(code)
+            if location and location not in store.locations:
+                store.locations.append(location)
+        stored_blocked_locations = payload.get("blocked_locations") or []
         for pallet_data in payload.get("pallets", []):
             items = [InventoryItemLine(**item_data) for item_data in pallet_data.get("items", [])]
             raw_color_key = str(pallet_data.get("color_key", "AUTO"))
             raw_color_mode = str(pallet_data.get("color_mode", "AUTO" if raw_color_key == "AUTO" else "MANUAL")).upper()
             raw_last_manual = str(pallet_data.get("last_manual_color_key", raw_color_key if raw_color_key != "AUTO" else auto_color_key_for_items(items))).upper()
             effective_color_key = resolve_effective_color_key(raw_color_mode, raw_last_manual, items)
-            store.pallets.append(PalletRecord(pallet_number=pallet_data.get("pallet_number", ""), location_code=normalize_location_code(pallet_data.get("location_code", "")), received_date=pallet_data.get("received_date", ""), color_key=effective_color_key, color_mode=raw_color_mode, last_manual_color_key=raw_last_manual, stack_order=int(pallet_data.get("stack_order", 0)), stack_group=pallet_data.get("stack_group"), orientation=int(pallet_data.get("orientation", 0)), map_x=pallet_data.get("map_x"), map_y=pallet_data.get("map_y"), updated_at=pallet_data.get("updated_at", now_text()), items=items))
+            store.pallets.append(PalletRecord(pallet_number=pallet_data.get("pallet_number", ""), location_code=normalize_location_code(pallet_data.get("location_code", "")), received_date=pallet_data.get("received_date", ""), color_key=effective_color_key, color_mode=raw_color_mode, last_manual_color_key=raw_last_manual, stack_order=int(pallet_data.get("stack_order", 0)), orientation=int(pallet_data.get("orientation", 0)), map_x=pallet_data.get("map_x"), map_y=pallet_data.get("map_y"), updated_at=pallet_data.get("updated_at", now_text()), items=items))
         for shipment_data in payload.get("shipments", []):
             items = [InventoryItemLine(**item_data) for item_data in shipment_data.get("items", [])]
             raw_color_key = str(shipment_data.get("color_key", "AUTO"))
@@ -306,7 +350,7 @@ class InventoryStore:
             effective_color_key = resolve_effective_color_key(raw_color_mode, raw_last_manual, items)
             store.shipments.append(ShipmentRecord(shipment_id=shipment_data.get("shipment_id", uuid4().hex), shipped_at=shipment_data.get("shipped_at", now_text()), pallet_number=shipment_data.get("pallet_number", ""), location_code=normalize_location_code(shipment_data.get("location_code", "")), received_date=shipment_data.get("received_date", ""), color_key=effective_color_key, color_mode=raw_color_mode, last_manual_color_key=raw_last_manual, orientation=int(shipment_data.get("orientation", 0)), map_x=shipment_data.get("map_x"), map_y=shipment_data.get("map_y"), items=items))
         store.ensure_defaults()
-        store.ensure_stack_groups()
+        store.restore_blocked_locations_with_validation(stored_blocked_locations)
         store.normalize_stacks()
         return store
 
@@ -315,10 +359,31 @@ def save_store(store: InventoryStore, path: Path = DATA_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     bak_path = path.with_suffix(path.suffix + ".bak")
-    tmp_path.write_text(json.dumps(store.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-    if path.exists():
-        path.replace(bak_path)
-    tmp_path.replace(path)
+    bak_tmp_path = path.with_suffix(path.suffix + ".bak.tmp")
+    try:
+        payload_text = json.dumps(store.to_dict(), ensure_ascii=False, indent=2)
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(payload_text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # 破損した tmp を本体に昇格させないため、置換前にJSONとストア構造を検証する。
+        verified_payload = json.loads(tmp_path.read_text(encoding="utf-8"))
+        InventoryStore.from_dict(verified_payload)
+        if path.exists():
+            shutil.copy2(path, bak_tmp_path)
+            bak_tmp_path.replace(bak_path)
+        try:
+            tmp_path.replace(path)
+        except Exception:
+            log_store_error(f"final replace failed: {path}\n{traceback.format_exc()}")
+            raise
+    finally:
+        for cleanup_path in (tmp_path, bak_tmp_path):
+            try:
+                if cleanup_path.exists():
+                    cleanup_path.unlink()
+            except Exception:
+                log_store_error(f"temporary file cleanup failed: {cleanup_path}\n{traceback.format_exc()}")
 
 
 def log_store_error(message: str) -> None:
@@ -468,7 +533,10 @@ def is_entry_staged_pallet(pallet: PalletRecord) -> bool:
         return False
     if pallet.map_x is None or pallet.map_y is None:
         return True
-    return abs(pallet.map_x - ENTRY_MAP_X) <= 0.0005 and abs(pallet.map_y - ENTRY_MAP_Y) <= 0.0005
+    return any(
+        abs(pallet.map_x - slot_x) <= ENTRY_WAITING_TOLERANCE and abs(pallet.map_y - slot_y) <= ENTRY_WAITING_TOLERANCE
+        for slot_x, slot_y in ENTRY_WAITING_SLOTS
+    )
 
 
 def location_to_grid(location: str) -> Tuple[int, int]:
@@ -923,6 +991,7 @@ class RegistrationDialog(QDialog):
         root.addLayout(form)
 
         box = QFrame(); grid = QGridLayout(box)
+        self.step_button_groups: List[Tuple[QPushButton, QPushButton, object]] = []
         self.part_code = ClearOnFocusLineEdit("39")
         self.size = QComboBox(); self.size.addItems(VALID_SIZES)
         self.size.setCurrentText("LL")
@@ -931,19 +1000,23 @@ class RegistrationDialog(QDialog):
         self.grade = QComboBox(); self.grade.setEditable(True); self.grade.addItems(VALID_GRADES)
         self.grade.setCurrentText("A")
         self.sheet_count = PositiveIntSpinBox(); self.sheet_count.setRange(0, 600); self.sheet_count.setValue(80)
+        thickness_control = self.create_step_control(self.thickness, lambda: is_single_thickness(self.thickness.text()))
+        sheet_control = self.create_step_control(self.sheet_count, lambda: True)
         self.note = QLineEdit(); self.note.setMaxLength(20)
         self.preview = QLabel()
         grid.addWidget(QLabel("品番"), 0, 0); grid.addWidget(QLabel("サイズ"), 0, 1); grid.addWidget(QLabel("厚み(mm)"), 0, 2)
-        grid.addWidget(self.part_code, 1, 0); grid.addWidget(self.size, 1, 1); grid.addWidget(self.thickness, 1, 2)
+        grid.addWidget(self.part_code, 1, 0); grid.addWidget(self.size, 1, 1); grid.addWidget(thickness_control, 1, 2)
         grid.addWidget(QLabel("加工 / 裏表"), 2, 0); grid.addWidget(QLabel("グレード"), 2, 1); grid.addWidget(QLabel("枚数"), 2, 2)
-        grid.addWidget(self.finish, 3, 0); grid.addWidget(self.grade, 3, 1); grid.addWidget(self.sheet_count, 3, 2); grid.addWidget(self.preview, 4, 0, 1, 3)
+        grid.addWidget(self.finish, 3, 0); grid.addWidget(self.grade, 3, 1); grid.addWidget(sheet_control, 3, 2); grid.addWidget(self.preview, 4, 0, 1, 3)
         grid.addWidget(QLabel("備考"), 5, 0)
         grid.addWidget(self.note, 6, 0, 1, 3)
         root.addWidget(box)
         for widget in [self.part_code, self.finish, self.note]: widget.textChanged.connect(self.update_preview)
         self.size.currentTextChanged.connect(self.update_preview); self.grade.currentTextChanged.connect(self.update_preview)
         self.thickness.textChanged.connect(self.update_preview); self.sheet_count.valueChanged.connect(self.update_preview)
+        self.thickness.textChanged.connect(self.update_step_buttons)
         self.update_preview()
+        self.update_step_buttons()
 
         add_line_button = QPushButton("明細を追加"); add_line_button.clicked.connect(self.add_line); root.addWidget(add_line_button)
         self.item_table = QTableWidget(0, 3); self.item_table.setHorizontalHeaderLabels(["識別", "高さ(mm)", "備考"])
@@ -966,6 +1039,53 @@ class RegistrationDialog(QDialog):
         self.update_color_controls()
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
+
+    def create_step_control(self, editor: QAbstractSpinBox, enabled_check) -> QWidget:
+        editor.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        editor.setStyleSheet("QAbstractSpinBox { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:4px 6px; min-height:34px; }")
+        wrapper = QWidget()
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        layout.addWidget(editor, 1)
+        button_column = QVBoxLayout()
+        button_column.setContentsMargins(0, 0, 0, 0)
+        button_column.setSpacing(2)
+        up_button = QPushButton("▲")
+        down_button = QPushButton("▼")
+        button_style = """
+        QPushButton {
+            background:#2f80c8;
+            color:#ffffff;
+            border:1px solid #6ab8ff;
+            border-radius:4px;
+            padding:0;
+            font:700 10pt 'Yu Gothic UI';
+        }
+        QPushButton:hover { background:#3b95e6; }
+        QPushButton:disabled {
+            background:#2b3748;
+            color:#71859b;
+            border-color:#405066;
+        }
+        """
+        for button, tooltip in [(up_button, "1増やす"), (down_button, "1減らす")]:
+            button.setFixedSize(34, 18)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setToolTip(tooltip)
+            button.setStyleSheet(button_style)
+            button_column.addWidget(button)
+        up_button.clicked.connect(lambda: editor.stepBy(1))
+        down_button.clicked.connect(lambda: editor.stepBy(-1))
+        layout.addLayout(button_column)
+        self.step_button_groups.append((up_button, down_button, enabled_check))
+        return wrapper
+
+    def update_step_buttons(self) -> None:
+        for up_button, down_button, enabled_check in self.step_button_groups:
+            enabled = bool(enabled_check())
+            up_button.setEnabled(enabled)
+            down_button.setEnabled(enabled)
 
     def update_preview(self) -> None:
         part = normalize_part_code(self.part_code.text()) or "38"
@@ -1531,11 +1651,19 @@ class TopMapWidget(QWidget):
         self.update()
 
     def scaled_bounds(self) -> QRect:
-        base = self.rect().adjusted(18, 18, -18, -18); center = base.center()
+        bottom_margin = 72 if self.has_entry_waiting_pallets() and self.height() >= 520 else 18
+        base = self.rect().adjusted(18, 18, -18, -bottom_margin); center = base.center()
         width = max(200, int(base.width() * self.zoom)); height = max(170, int(base.height() * self.zoom * 1.07))
         rect = QRect(center.x() - width // 2, center.y() - height // 2, width, height)
         rect.translate(self.pan_offset)
         return rect
+
+    def has_entry_waiting_pallets(self) -> bool:
+        return any(is_entry_staged_pallet(pallet) for pallet in self.store.pallets)
+
+    def entry_waiting_area_rect(self, bounds: QRect) -> QRect:
+        available = self.rect().adjusted(18, 18, -18, -18)
+        return QRect(available.left(), available.bottom() - 46, available.width(), 46)
 
     def clamp_pan(self) -> None:
         base = self.rect().adjusted(18, 18, -18, -18)
@@ -1561,6 +1689,30 @@ class TopMapWidget(QWidget):
             y = bounds.top() + (i + 0.5) * bounds.height() / rows
             painter.drawText(QRect(bounds.right() + 4, int(y) - 6, 28, 12), Qt.AlignVCenter | Qt.AlignLeft, str(i + 1))
         return columns, rows
+
+    def draw_entry_waiting_area(self, painter: QPainter, bounds: QRect) -> None:
+        if not self.has_entry_waiting_pallets():
+            return
+        area = self.entry_waiting_area_rect(bounds)
+        painter.setPen(QPen(QColor("#2c79b8"), 1, Qt.DashLine))
+        painter.setBrush(QColor(9, 24, 38, 185))
+        painter.drawRoundedRect(area, 10, 10)
+        painter.setPen(QColor("#7fd0ff"))
+        painter.setFont(QFont("Yu Gothic UI", 8, QFont.Bold))
+        painter.drawText(area.adjusted(10, 4, -10, -4), Qt.AlignTop | Qt.AlignLeft, "入口待機エリア")
+        painter.setPen(QPen(QColor("#214d76"), 1, Qt.DotLine))
+        for slot_x, slot_y in ENTRY_WAITING_SLOTS:
+            point = self.point_from_waiting_slot(bounds, slot_x, slot_y)
+            painter.drawRoundedRect(QRect(point.x() - 24, point.y() - 11, 48, 22), 5, 5)
+
+    def point_from_waiting_slot(self, bounds: QRect, map_x: float, map_y: float) -> QPoint:
+        area = self.entry_waiting_area_rect(bounds)
+        min_y = min(slot_y for _slot_x, slot_y in ENTRY_WAITING_SLOTS)
+        max_y = max(slot_y for _slot_x, slot_y in ENTRY_WAITING_SLOTS)
+        y_ratio = 0.5 if max_y == min_y else (map_y - min_y) / (max_y - min_y)
+        x = area.left() + int(area.width() * map_x)
+        y = area.center().y() + int((max(0.0, min(1.0, y_ratio)) - 0.5) * max(1, area.height() - 24))
+        return QPoint(x, y)
 
     def compute_location_rects(self, bounds: QRect, columns: int, rows: int) -> Dict[str, QRect]:
         locations = sorted(self.store.locations)
@@ -1589,6 +1741,8 @@ class TopMapWidget(QWidget):
         return max(0.012, min(scale, 0.06))
 
     def clamped_normalized_for_pallet(self, pallet: PalletRecord, map_x: float, map_y: float, stack_index: int = 0) -> Tuple[float, float]:
+        if map_y > 1.0:
+            return max(0.0, min(0.999, map_x)), map_y
         bounds = self.scaled_bounds()
         if bounds.width() <= 0 or bounds.height() <= 0:
             return map_x, map_y
@@ -1623,6 +1777,8 @@ class TopMapWidget(QWidget):
     def point_from_pallet(self, pallet: PalletRecord) -> QPoint:
         bounds = self.scaled_bounds()
         if pallet.map_x is not None and pallet.map_y is not None:
+            if pallet.map_y > 1.0:
+                return self.point_from_waiting_slot(bounds, pallet.map_x, pallet.map_y)
             map_x, map_y = self.clamped_normalized_for_pallet(pallet, pallet.map_x, pallet.map_y)
             x = bounds.left() + int(bounds.width() * map_x)
             y = bounds.top() + int(bounds.height() * map_y)
@@ -1702,6 +1858,7 @@ class TopMapWidget(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing); painter.fillRect(self.rect(), QColor("#07111f"))
         self.location_rects.clear(); self.pallet_rects.clear(); bounds = self.scaled_bounds(); columns, rows = self.draw_grid(painter, bounds)
+        self.draw_entry_waiting_area(painter, bounds)
         entrance_rect = QRect(bounds.center().x() - 80, bounds.bottom() - 28, 160, 18)
         painter.setPen(QPen(QColor("#4fc3ff"), 2))
         painter.drawLine(entrance_rect.left(), entrance_rect.top(), entrance_rect.left() + 18, entrance_rect.top())
@@ -1723,9 +1880,9 @@ class TopMapWidget(QWidget):
         if self.selected_pallet:
             selected = self.store.get_pallet(self.selected_pallet)
             if selected is not None:
-                selected_group_key = selected.stack_group or selected.pallet_number
-        for pallet in sorted(self.store.pallets, key=lambda p: (p.location_code, p.stack_group or p.pallet_number, p.stack_order, p.pallet_number)):
-            key = pallet.stack_group or pallet.pallet_number
+                selected_group_key = selected.pallet_number if self.store.is_entry_waiting_pallet(selected) else normalize_location_code(selected.location_code)
+        for pallet in sorted(self.store.pallets, key=lambda p: (normalize_location_code(p.location_code), p.stack_order, p.pallet_number)):
+            key = pallet.pallet_number if self.store.is_entry_waiting_pallet(pallet) else normalize_location_code(pallet.location_code)
             group_index[pallet.pallet_number] = group_counts.get(key, 0)
             group_counts[key] = group_counts.get(key, 0) + 1
         for pallet in sorted(self.store.pallets, key=lambda p: (p.location_code, p.stack_order, p.pallet_number)):
@@ -1733,7 +1890,7 @@ class TopMapWidget(QWidget):
             base_point = self.point_from_pallet(pallet)
             scale = self.draw_scale(bounds)
             stack_index = group_index.get(pallet.pallet_number, pallet.stack_order)
-            group_key = pallet.stack_group or pallet.pallet_number
+            group_key = pallet.pallet_number if self.store.is_entry_waiting_pallet(pallet) else normalize_location_code(pallet.location_code)
             selected_stack = selected_group_key is not None and group_key == selected_group_key and group_counts.get(group_key, 1) > 1
             shift_x = 22 if selected_stack else 6
             shift_y = 17 if selected_stack else 5
@@ -2090,14 +2247,16 @@ class IsometricMapWidget(QWidget):
         painter.drawText(QRect(int(entrance_point.x() - 46), int(entrance_point.y() + 28), 92, 18), Qt.AlignCenter, "入口")
         groups: Dict[str, List[PalletRecord]] = {}
         for pallet in self.store.pallets:
-            groups.setdefault(pallet.stack_group or pallet.pallet_number, []).append(pallet)
+            key = pallet.pallet_number if self.store.is_entry_waiting_pallet(pallet) else normalize_location_code(pallet.location_code)
+            groups.setdefault(key, []).append(pallet)
         base_points: Dict[str, QPointF] = {}
         group_entries: List[Tuple[float, float, str, List[PalletRecord], QPointF]] = []
         for group_key, members in groups.items():
             members.sort(key=lambda p: (p.stack_order, p.updated_at, p.pallet_number))
             anchor = members[0]
             if anchor.map_x is not None and anchor.map_y is not None:
-                base = self.project_normalized_point(bounds, anchor.map_x, anchor.map_y)
+                projected_y = ENTRY_MAP_Y if anchor.map_y > 1.0 else anchor.map_y
+                base = self.project_normalized_point(bounds, anchor.map_x, projected_y)
             else:
                 nx, ny = self.location_normalized_point(anchor.location_code)
                 base = self.project_normalized_point(bounds, nx, ny)
@@ -2203,9 +2362,6 @@ class MainWindow(QMainWindow):
         self.detail_drag_offset = QPoint()
         self.detail_frame_manual_position: Optional[QPoint] = None
         self.store_dirty = False
-        self.save_timer = QTimer(self)
-        self.save_timer.setSingleShot(True)
-        self.save_timer.timeout.connect(self.persist_store_if_dirty)
         self.setWindowTitle("Warehouse Management App - PySide6"); self.resize(1480, 920); self.setMinimumSize(900, 620)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
@@ -2273,7 +2429,7 @@ class MainWindow(QMainWindow):
         self.stack_detail_pages = QStackedWidget()
         self.stack_detail_pages.installEventFilter(self)
         detail_layout.addWidget(self.stack_detail_pages, 1)
-        self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.toggle_blocked_location); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
+        self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.set_blocked_location_with_validation); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
         self.iso_map = IsometricMapWidget(self.store); self.iso_map.palletSelected.connect(self.select_pallet); self.iso_map.selectionCleared.connect(self.clear_selection); self.iso_map.palletDoubleClicked.connect(self.open_selected_pallet_editor)
         self.iso_rotate_button = QPushButton("視点90°")
         self.iso_rotate_button.setParent(self.iso_map)
@@ -2304,11 +2460,11 @@ class MainWindow(QMainWindow):
         sections = [
             ("基本操作", "1. 新規登録でパレット番号と明細を入力\n2. 明細を追加で一覧に入れる\n3. 真上ビューで入口から保管位置へドラッグ移動"),
             ("位置変更", "真上ビューでパレットをドラッグすると移動できます。\n積み重ねたい時は他パレットへ近づけて置きます。"),
-            ("積み重ね", "列を解除は、一番上のパレットを1枚だけ外して入口へ戻します。\n段を上げる / 下げるは同じ列の上下順を入れ替えます。"),
+            ("積み重ね", "列を解除は、選択中のパレットを1枚だけ外して入口待機エリアへ戻します。\n段を上げる / 下げるは同じ列の上下順を入れ替えます。"),
             ("置けないマス設定", "置けないマス設定を押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
             ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\n厚みと枚数は行内の +/- で調整できます。"),
             ("積み替え", "積み替えでは、既存パレットへの移動か空パレット作成を選べます。\n空パレットは入口に作成されます。"),
-            ("出庫と復元", "出庫したパレットは出庫一覧へ移ります。\n復元すると元位置ではなく入口へ戻ります。"),
+            ("出庫と復元", "出庫したパレットは出庫一覧へ移ります。\n復元すると元位置ではなく入口待機エリアへ置かれます。"),
             ("色の見方", "自動判別は明細内容で色を決めます。\nC/Cのみは紫、#38は赤、#39は青、#45は緑、#50は桃、#40は黄、混在やその他はグレーです。"),
             ("困った時", "位置が変なら真上ビューで確認してください。\nデータ共有は Export / Import を使います。\n読込エラー時は store-error.log を確認してください。"),
         ]
@@ -2595,17 +2751,14 @@ class MainWindow(QMainWindow):
         self.top_map.setCursor(Qt.CrossCursor if enabled else Qt.ArrowCursor)
         self.top_map.update()
 
-    def toggle_blocked_location(self, location: str, blocked: bool) -> None:
-        location = normalize_location_code(location)
-        if blocked:
-            if any(normalize_location_code(pallet.location_code) == location for pallet in self.store.pallets):
-                QMessageBox.information(self, "置けないマス設定", f"{location} には既にパレットがあるため、置けないマスにはできません。")
-                return
-            if location not in self.store.blocked_locations:
-                self.store.blocked_locations.append(location)
-        else:
-            self.store.blocked_locations = [code for code in self.store.blocked_locations if code != location]
-        self.store.blocked_locations.sort(key=lambda code: location_to_grid(code))
+    def set_blocked_location_with_validation(self, location: str, blocked: bool) -> None:
+        try:
+            changed = self.store.set_blocked_location_with_validation(location, blocked)
+        except ValueError as exc:
+            QMessageBox.information(self, "置けないマス設定", str(exc))
+            return
+        if not changed:
+            return
         self.mark_store_dirty()
         self.refresh_all()
 
@@ -2649,33 +2802,86 @@ class MainWindow(QMainWindow):
         return result
 
     def refresh_all(self) -> None:
-        self.store.ensure_defaults(); self.store.ensure_stack_groups(); self.store.normalize_stacks()
+        self.store.ensure_defaults(); self.store.normalize_stacks()
         for pallet in self.store.pallets:
             pallet.color_key = resolve_effective_color_key(pallet.color_mode, pallet.last_manual_color_key, pallet.items)
         capacity = self.capacity_percent()
         self.summary_label.setText(f"パレット {len(self.store.pallets)} / 明細 {sum(len(p.items) for p in self.store.pallets)} / 総枚数 {sum(p.total_sheets for p in self.store.pallets)} / 面積使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
         self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_shipment_table(); self.refresh_detail()
 
+    def normalize_store_stacks(self) -> None:
+        self.store.normalize_stacks()
+
     def mark_store_dirty(self, immediate: bool = False) -> None:
         self.store_dirty = True
-        if immediate:
-            self.persist_store_if_dirty()
-            return
-        self.save_timer.start(400)
+        self.persist_store_if_dirty()
 
-    def persist_store_if_dirty(self) -> None:
-        if not self.store_dirty:
-            return
+    def prepare_store_for_save(self) -> None:
         self.store.ensure_defaults()
-        self.store.ensure_stack_groups()
         self.store.normalize_stacks()
         for pallet in self.store.pallets:
             pallet.color_key = resolve_effective_color_key(pallet.color_mode, pallet.last_manual_color_key, pallet.items)
-        save_store(self.store)
-        self.store_dirty = False
+
+    def save_store_with_alerts(self, path: Path = DATA_PATH) -> bool:
+        self.prepare_store_for_save()
+        target_path = path
+        last_error: Optional[Exception] = None
+        while True:
+            try:
+                save_store(self.store, target_path)
+                self.store_dirty = False
+                if target_path != DATA_PATH:
+                    QMessageBox.information(self, "保存", f"保存しました。\n{target_path}")
+                return True
+            except Exception as error:
+                last_error = error
+                log_store_error(f"save failed: {target_path}\n{traceback.format_exc()}")
+
+            action = self.show_save_failure_dialog(target_path, last_error)
+            if action == "retry":
+                continue
+            if action == "save_as":
+                default_name = APP_DIR / f"inventory-data-recovery-{datetime.now():%Y%m%d-%H%M%S}.json"
+                file_path, _ = QFileDialog.getSaveFileName(self, "別名保存", str(default_name), "JSON Files (*.json)")
+                if not file_path:
+                    return False
+                target_path = Path(file_path)
+                continue
+            return False
+
+    def show_save_failure_dialog(self, path: Path, error: Optional[Exception]) -> str:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Critical)
+        box.setWindowTitle("保存失敗")
+        box.setText("データの保存に失敗しました。")
+        detail = f"保存先:\n{path}"
+        if error is not None:
+            detail += f"\n\n原因:\n{error}"
+        detail += "\n\n未保存の変更があります。再試行するか、別名保存してください。"
+        box.setInformativeText(detail)
+        retry_button = box.addButton("再試行", QMessageBox.AcceptRole)
+        save_as_button = box.addButton("別名保存", QMessageBox.ActionRole)
+        close_button = box.addButton("閉じる", QMessageBox.RejectRole)
+        box.setDefaultButton(retry_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == retry_button:
+            return "retry"
+        if clicked == save_as_button:
+            return "save_as"
+        if clicked == close_button:
+            return "close"
+        return "close"
+
+    def persist_store_if_dirty(self) -> bool:
+        if not self.store_dirty:
+            return True
+        return self.save_store_with_alerts(DATA_PATH)
 
     def closeEvent(self, event) -> None:
-        self.persist_store_if_dirty()
+        if not self.persist_store_if_dirty():
+            event.ignore()
+            return
         super().closeEvent(event)
 
     def capacity_percent(self) -> float:
@@ -2844,7 +3050,7 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(
             self,
             "復元確認",
-            f"{len(rows)}件の出庫履歴を復元します。\n元位置ではなく入口に戻ります。続行しますか？",
+            f"{len(rows)}件の出庫履歴を復元します。\n元位置ではなく入口待機エリアへ置きます。続行しますか？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         ) != QMessageBox.Yes:
@@ -2877,17 +3083,18 @@ class MainWindow(QMainWindow):
                 color_mode=shipment.color_mode,
                 last_manual_color_key=shipment.last_manual_color_key,
                 stack_order=self.store.next_stack_order(location_code),
-                stack_group=pallet_number,
                 orientation=shipment.orientation,
                 map_x=ENTRY_MAP_X,
                 map_y=ENTRY_MAP_Y,
                 items=[clone_item(item) for item in shipment.items],
                 updated_at=now_text(),
             )
+            restored.location_code, restored.map_x, restored.map_y = self.find_entry_waiting_placement(restored)
             self.store.pallets.append(restored)
             restored_numbers.append(pallet_number)
         target_ids = {shipment.shipment_id for shipment in target_shipments}
         self.store.shipments = [shipment for shipment in self.store.shipments if shipment.shipment_id not in target_ids]
+        self.store.normalize_stacks()
         if restored_numbers:
             self.select_pallet(restored_numbers[0])
         self.mark_store_dirty()
@@ -2943,6 +3150,7 @@ class MainWindow(QMainWindow):
         )
         self.store.shipments.append(shipment)
         self.store.pallets = [item for item in self.store.pallets if item.pallet_number != pallet.pallet_number]
+        self.normalize_store_stacks()
         self.clear_selection()
         self.mark_store_dirty()
         self.refresh_all()
@@ -3009,15 +3217,19 @@ class MainWindow(QMainWindow):
         self.detail_frame.show()
 
     def nearby_stack_target(self, source: PalletRecord, map_x: float, map_y: float, location_code: str) -> Optional[PalletRecord]:
+        if normalize_location_code(location_code) == ENTRY_LOCATION:
+            return None
+        location_code = normalize_location_code(location_code)
+        source_members = {member.pallet_number for member in self.store.group_members(source)}
         best = None
         best_distance = None
         for pallet in self.store.pallets:
-            if pallet.pallet_number == source.pallet_number:
+            if pallet.pallet_number in source_members:
                 continue
-            if pallet.location_code != location_code or pallet.map_x is None or pallet.map_y is None:
+            if normalize_location_code(pallet.location_code) != location_code or pallet.map_x is None or pallet.map_y is None:
                 continue
             distance = (pallet.map_x - map_x) ** 2 + (pallet.map_y - map_y) ** 2
-            if distance <= 0.0049 and (best_distance is None or distance < best_distance):
+            if best_distance is None or distance < best_distance:
                 best = pallet
                 best_distance = distance
         return best
@@ -3072,6 +3284,26 @@ class MainWindow(QMainWindow):
                 return candidate_x, candidate_y
         return None
 
+    def find_entry_waiting_placement(self, pallet: PalletRecord) -> Tuple[str, float, float]:
+        for slot_x, slot_y in ENTRY_WAITING_SLOTS:
+            candidate_x, candidate_y = self.top_map.clamped_normalized_for_pallet(pallet, slot_x, slot_y)
+            if not self.pallet_would_collide(pallet, candidate_x, candidate_y, ENTRY_LOCATION):
+                return ENTRY_LOCATION, candidate_x, candidate_y
+
+        ranked_locations = sorted(
+            (location for location in self.store.locations if location not in self.store.blocked_locations),
+            key=lambda location: (
+                (self.top_map.normalized_position_for_location(location, pallet)[0] - ENTRY_MAP_X) ** 2
+                + (self.top_map.normalized_position_for_location(location, pallet)[1] - ENTRY_MAP_Y) ** 2
+            ),
+        )
+        for location in ranked_locations:
+            candidate_x, candidate_y = self.top_map.normalized_position_for_location(location, pallet)
+            if not self.pallet_would_collide(pallet, candidate_x, candidate_y, location):
+                return location, candidate_x, candidate_y
+
+        return ENTRY_LOCATION, ENTRY_MAP_X, ENTRY_WAITING_SLOTS[-1][1]
+
     def move_pallet(self, pallet_number: str, map_x: float, map_y: float, destination: str) -> None:
         pallet = self.store.get_pallet(pallet_number)
         if not pallet: return
@@ -3084,26 +3316,26 @@ class MainWindow(QMainWindow):
         dy = map_y - old_y
         target_stack = self.nearby_stack_target(pallet, map_x, map_y, destination)
 
-        if target_stack and (target_stack.stack_group or target_stack.pallet_number) != (pallet.stack_group or pallet.pallet_number):
-            target_group = target_stack.stack_group or target_stack.pallet_number
+        if target_stack and normalize_location_code(target_stack.location_code) != normalize_location_code(pallet.location_code):
             target_members = self.store.group_members(target_stack)
             next_order = len(target_members)
             for index, member in enumerate(members):
                 member.location_code = destination
                 member.map_x = target_stack.map_x if target_stack.map_x is not None else map_x
                 member.map_y = target_stack.map_y if target_stack.map_y is not None else map_y
-                member.stack_group = target_group
                 member.stack_order = next_order + index
                 member.updated_at = now_text()
         else:
-            group_key = pallet.stack_group or pallet.pallet_number
             for member in members:
                 member.location_code = destination
-                member.stack_group = group_key
                 member.map_x = (member.map_x if member.map_x is not None else old_x) + dx
                 member.map_y = (member.map_y if member.map_y is not None else old_y) + dy
                 member.updated_at = now_text()
-        pallet.updated_at = now_text(); self.select_pallet(pallet_number); self.mark_store_dirty(); self.refresh_all()
+        pallet.updated_at = now_text()
+        self.store.normalize_stacks()
+        self.select_pallet(pallet_number)
+        self.mark_store_dirty()
+        self.refresh_all()
 
     def rotate_selected_pallet(self) -> None:
         pallet = self.store.get_pallet(self.current_pallet_number or "")
@@ -3132,6 +3364,7 @@ class MainWindow(QMainWindow):
         other = members[new_index]
         pallet.stack_order, other.stack_order = other.stack_order, pallet.stack_order
         pallet.updated_at = now_text()
+        self.normalize_store_stacks()
         self.mark_store_dirty()
         self.refresh_all()
 
@@ -3144,24 +3377,18 @@ class MainWindow(QMainWindow):
         if len(members) <= 1:
             QMessageBox.information(self, "列を解除", "このパレットは単独なので解除する列がありません。")
             return
-        pallet = members[-1]
-        old_group_key = pallet.stack_group or pallet.pallet_number
+        pallet = selected_pallet
         remaining_members = [member for member in members if member.pallet_number != pallet.pallet_number]
-        remaining_group_key = old_group_key
-        if remaining_members and old_group_key == pallet.pallet_number:
-            remaining_group_key = remaining_members[0].pallet_number
         for index, member in enumerate(remaining_members):
-            member.stack_group = remaining_group_key
             member.stack_order = index
             member.updated_at = now_text()
-        target_location = ENTRY_LOCATION
-        target_position = self.top_map.clamped_normalized_for_pallet(pallet, ENTRY_MAP_X, ENTRY_MAP_Y)
-        pallet.stack_group = pallet.pallet_number
+        target_location, target_x, target_y = self.find_entry_waiting_placement(pallet)
         pallet.stack_order = 0
         pallet.location_code = target_location
-        pallet.map_x, pallet.map_y = target_position
+        pallet.map_x, pallet.map_y = target_x, target_y
         pallet.updated_at = now_text()
         self.current_pallet_number = pallet.pallet_number
+        self.normalize_store_stacks()
         self.mark_store_dirty()
         self.refresh_all()
         QMessageBox.information(self, "列を解除", "解除したパレットは入口へ移動しました。")
@@ -3190,8 +3417,6 @@ class MainWindow(QMainWindow):
         location_code = normalize_location_code(location_code)
         if location_code not in self.store.locations:
             self.store.locations.append(location_code)
-        old_group = pallet.stack_group or pallet.pallet_number
-        old_number = pallet.pallet_number
         pallet.pallet_number = pallet_number
         pallet.location_code = location_code
         pallet.received_date = received_date
@@ -3201,10 +3426,9 @@ class MainWindow(QMainWindow):
         pallet.color_key = resolve_effective_color_key(color_mode, last_manual_color_key, items)
         pallet.stack_order = stack_order
         pallet.items = items
-        if old_group == old_number:
-            pallet.stack_group = pallet_number
         pallet.updated_at = now_text()
         self.current_pallet_number = pallet_number
+        self.normalize_store_stacks()
         self.mark_store_dirty()
         self.refresh_all()
         if pallet_number != requested_number:
@@ -3246,13 +3470,13 @@ class MainWindow(QMainWindow):
                 color_mode="AUTO",
                 last_manual_color_key="GRAY",
                 stack_order=self.store.next_stack_order(location_code),
-                stack_group=target_number,
                 orientation=source.orientation,
                 map_x=ENTRY_MAP_X,
                 map_y=ENTRY_MAP_Y,
                 items=[transferred_item],
                 updated_at=now_text(),
             )
+            target.location_code, target.map_x, target.map_y = self.find_entry_waiting_placement(target)
             self.store.pallets.append(target)
         else:
             target = self.store.get_pallet(target_ref)
@@ -3266,6 +3490,7 @@ class MainWindow(QMainWindow):
             target.items.append(clone_item(source_item, quantity))
         source.updated_at = now_text()
         target.updated_at = now_text()
+        self.store.normalize_stacks()
         self.mark_store_dirty()
         if target_mode == "NEW":
             self.select_pallet(target.pallet_number)
@@ -3283,7 +3508,10 @@ class MainWindow(QMainWindow):
         color_key = resolve_effective_color_key(color_mode, last_manual_color_key, items)
         location_code = ENTRY_LOCATION
         if location_code not in self.store.locations: self.store.locations.append(location_code)
-        self.store.pallets.append(PalletRecord(pallet_number=pallet_number, location_code=location_code, received_date=received_date, color_key=color_key, color_mode=color_mode, last_manual_color_key=last_manual_color_key, stack_order=self.store.next_stack_order(location_code), stack_group=pallet_number, orientation=orientation, map_x=ENTRY_MAP_X, map_y=ENTRY_MAP_Y, items=items, updated_at=now_text()))
+        pallet = PalletRecord(pallet_number=pallet_number, location_code=location_code, received_date=received_date, color_key=color_key, color_mode=color_mode, last_manual_color_key=last_manual_color_key, stack_order=self.store.next_stack_order(location_code), orientation=orientation, map_x=ENTRY_MAP_X, map_y=ENTRY_MAP_Y, items=items, updated_at=now_text())
+        pallet.location_code, pallet.map_x, pallet.map_y = self.find_entry_waiting_placement(pallet)
+        self.store.pallets.append(pallet)
+        self.normalize_store_stacks()
         self.select_pallet(pallet_number); self.mark_store_dirty(); self.refresh_all()
         if pallet_number != requested_number:
             QMessageBox.information(self, "新規登録", f"同名ありのため、`{pallet_number}` で登録しました。")
@@ -3291,7 +3519,8 @@ class MainWindow(QMainWindow):
     def export_data(self) -> None:
         default_name = APP_DIR / f"inventory-export-{datetime.now():%Y%m%d-%H%M%S}.json"
         file_path, _ = QFileDialog.getSaveFileName(self, "Export", str(default_name), "JSON Files (*.json)")
-        if file_path: save_store(self.store, Path(file_path)); QMessageBox.information(self, "Export", f"書き出しました。\n{file_path}")
+        if file_path:
+            self.save_store_with_alerts(Path(file_path))
 
     def import_data(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "Import", str(APP_DIR), "JSON Files (*.json)")
