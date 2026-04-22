@@ -94,6 +94,7 @@ ENTRY_MAP_X = 0.5
 ENTRY_MAP_Y = 0.95
 ENTRY_WAITING_SLOTS: List[Tuple[float, float]] = [
     (0.50, 1.08), (0.42, 1.08), (0.58, 1.08), (0.34, 1.08), (0.66, 1.08),
+    (0.50, 1.13), (0.42, 1.13), (0.58, 1.13), (0.34, 1.13), (0.66, 1.13),
 ]
 ENTRY_WAITING_TOLERANCE = 0.035
 
@@ -1699,7 +1700,7 @@ class TopMapWidget(QWidget):
         painter.drawRoundedRect(area, 10, 10)
         painter.setPen(QColor("#7fd0ff"))
         painter.setFont(QFont("Yu Gothic UI", 8, QFont.Bold))
-        painter.drawText(area.adjusted(10, 4, -10, -4), Qt.AlignTop | Qt.AlignLeft, "入口待機エリア")
+        painter.drawText(area.adjusted(10, 4, -10, -4), Qt.AlignTop | Qt.AlignLeft, "仮置きエリア（未配置）")
         painter.setPen(QPen(QColor("#214d76"), 1, Qt.DotLine))
         for slot_x, slot_y in ENTRY_WAITING_SLOTS:
             point = self.point_from_waiting_slot(bounds, slot_x, slot_y)
@@ -2458,15 +2459,20 @@ class MainWindow(QMainWindow):
         layout.setSpacing(12)
 
         sections = [
-            ("基本操作", "1. 新規登録でパレット番号と明細を入力\n2. 明細を追加で一覧に入れる\n3. 真上ビューで入口から保管位置へドラッグ移動"),
-            ("位置変更", "真上ビューでパレットをドラッグすると移動できます。\n積み重ねたい時は他パレットへ近づけて置きます。"),
-            ("積み重ね", "列を解除は、選択中のパレットを1枚だけ外して入口待機エリアへ戻します。\n段を上げる / 下げるは同じ列の上下順を入れ替えます。"),
+            ("基本操作", "1. 新規登録でパレット番号・入庫日・明細を入力\n2. 明細を追加してから OK で登録\n3. 登録直後は仮置きエリア（未配置）に入るため、真上ビューで保管場所へドラッグ移動"),
+            ("仮置きエリア（未配置）", "新規登録・出庫復元・列解除・積み替えで作成した空パレットは仮置きエリアへ入ります。\n上限は10個です。上限に達した場合は、先に仮置きエリア内のパレットを倉庫内へ配置してください。\n仮置き中のパレットは、パレット数・明細数・総枚数・面積使用率にカウントしません。"),
+            ("位置変更", "真上ビューでパレットをドラッグ、またはタブレットでスワイプして移動します。\nある程度グリッドに吸着しますが、細かい位置調整もできます。\nパレットのない場所をクリックすると選択解除できます。"),
+            ("積み重ね", "1ロケーション = 1スタック列です。同じロケーションに置いたパレットは同じ列として扱います。\n段を上げる / 下げるで同じ列の上下順を入れ替えます。\n列を解除は、選択中のパレットを1枚だけ外して仮置きエリア（未配置）へ移動します。"),
+            ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n面積使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、面積使用率では1パレット列分としてカウントします。"),
             ("置けないマス設定", "置けないマス設定を押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
-            ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\n厚みと枚数は行内の +/- で調整できます。"),
-            ("積み替え", "積み替えでは、既存パレットへの移動か空パレット作成を選べます。\n空パレットは入口に作成されます。"),
-            ("出庫と復元", "出庫したパレットは出庫一覧へ移ります。\n復元すると元位置ではなく入口待機エリアへ置かれます。"),
-            ("色の見方", "自動判別は明細内容で色を決めます。\nC/Cのみは紫、#38は赤、#39は青、#45は緑、#50は桃、#40は黄、混在やその他はグレーです。"),
-            ("困った時", "位置が変なら真上ビューで確認してください。\nデータ共有は Export / Import を使います。\n読込エラー時は store-error.log を確認してください。"),
+            ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\nパレット番号・入庫日・色・向き・明細の追加/削除/順番変更ができます。\n厚みと枚数は行内の +/- で調整できます。厚みが 3-3.5 のような範囲入力の場合、+/- は使えません。"),
+            ("積み替え", "積み替えでは、選択中パレットの一部枚数を既存パレットまたは空パレットへ移動できます。\n同じ明細でも自動では合算しません。\n空パレットを作る場合は仮置きエリア（未配置）に作成されます。"),
+            ("出庫と復元", "出庫したパレットは真上ビューと在庫一覧から外れ、出庫一覧へ移ります。\n出庫履歴は削除または復元できます。\n復元すると元位置ではなく仮置きエリア（未配置）へ置かれます。"),
+            ("45度ビュー", "45度ビューは立体確認用です。パレット移動は真上ビューで行います。\n視点90°で向きを切り替え、ドラッグで表示位置を動かせます。\n積み重ねは真上に積まれた状態で表示します。"),
+            ("在庫一覧", "在庫一覧では列ヘッダーをクリックして並び替えできます。\n検索はスペース区切り AND 検索です。例: 39 LL 10 A\n一覧コピーでExcelへ貼り付けでき、棚卸データ出力では同じ品番・サイズ・厚み・加工・グレードを合計します。"),
+            ("色の見方", "自動判別は明細内容で色を決めます。\nC/Cのみは紫、#38は赤、#39は青、#45は緑、#50は桃、#40は黄、混在やその他はグレーです。\n新規登録・編集では自動判別と手動指定を切り替えられます。"),
+            ("保存と共有", "編集確定・登録確定・移動完了・積み替え確定・出庫確定など、データ変更が確定した時に保存します。\n保存に失敗した場合は再試行または別名保存を選べます。\nデータ共有は Export / Import を使います。Import は現在データを上書きするため確認が出ます。"),
+            ("困った時", "位置や段順が変に見える場合は、まず真上ビューでロケーションと積み段を確認してください。\nデータ読込エラーや保存エラーは store-error.log に記録されます。\n本体とバックアップの両方が読めない場合は、復旧ダイアログを表示して起動を停止します。"),
         ]
 
         title = QLabel("操作ヘルプ")
@@ -2805,8 +2811,9 @@ class MainWindow(QMainWindow):
         self.store.ensure_defaults(); self.store.normalize_stacks()
         for pallet in self.store.pallets:
             pallet.color_key = resolve_effective_color_key(pallet.color_mode, pallet.last_manual_color_key, pallet.items)
+        placed_pallets = self.placed_pallets()
         capacity = self.capacity_percent()
-        self.summary_label.setText(f"パレット {len(self.store.pallets)} / 明細 {sum(len(p.items) for p in self.store.pallets)} / 総枚数 {sum(p.total_sheets for p in self.store.pallets)} / 面積使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
+        self.summary_label.setText(f"パレット {len(placed_pallets)} / 明細 {sum(len(p.items) for p in placed_pallets)} / 総枚数 {sum(p.total_sheets for p in placed_pallets)} / 面積使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
         self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_shipment_table(); self.refresh_detail()
 
     def normalize_store_stacks(self) -> None:
@@ -2884,9 +2891,17 @@ class MainWindow(QMainWindow):
             return
         super().closeEvent(event)
 
+    def placed_pallets(self) -> List[PalletRecord]:
+        return [pallet for pallet in self.store.pallets if not self.store.is_entry_waiting_pallet(pallet)]
+
     def capacity_percent(self) -> float:
         base_area = 1300 * 2300 * 100
-        used_area = sum(footprint_mm(pallet)[0] * footprint_mm(pallet)[1] for pallet in self.store.pallets)
+        location_areas: Dict[str, int] = {}
+        for pallet in self.placed_pallets():
+            width_mm, depth_mm = footprint_mm(pallet)
+            location_code = normalize_location_code(pallet.location_code)
+            location_areas[location_code] = max(location_areas.get(location_code, 0), width_mm * depth_mm)
+        used_area = sum(location_areas.values())
         return 0.0 if base_area <= 0 else (used_area / base_area) * 100.0
 
     def refresh_inventory_table(self) -> None:
@@ -3050,7 +3065,7 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(
             self,
             "復元確認",
-            f"{len(rows)}件の出庫履歴を復元します。\n元位置ではなく入口待機エリアへ置きます。続行しますか？",
+            f"{len(rows)}件の出庫履歴を復元します。\n元位置ではなく仮置きエリア（未配置）へ置きます。続行しますか？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         ) != QMessageBox.Yes:
@@ -3065,6 +3080,9 @@ class MainWindow(QMainWindow):
             if shipment is not None:
                 target_shipments.append(shipment)
         if not target_shipments:
+            return
+        if not self.has_entry_waiting_capacity(len(target_shipments)):
+            QMessageBox.warning(self, "復元", self.entry_waiting_full_message())
             return
         restored_numbers: List[str] = []
         renamed_pairs: List[Tuple[str, str]] = []
@@ -3089,7 +3107,11 @@ class MainWindow(QMainWindow):
                 items=[clone_item(item) for item in shipment.items],
                 updated_at=now_text(),
             )
-            restored.location_code, restored.map_x, restored.map_y = self.find_entry_waiting_placement(restored)
+            try:
+                restored.location_code, restored.map_x, restored.map_y = self.find_entry_waiting_placement(restored)
+            except ValueError as exc:
+                QMessageBox.warning(self, "復元", str(exc))
+                return
             self.store.pallets.append(restored)
             restored_numbers.append(pallet_number)
         target_ids = {shipment.shipment_id for shipment in target_shipments}
@@ -3284,25 +3306,34 @@ class MainWindow(QMainWindow):
                 return candidate_x, candidate_y
         return None
 
+    def entry_waiting_count(self) -> int:
+        return sum(1 for pallet in self.store.pallets if self.store.is_entry_waiting_pallet(pallet))
+
+    def has_entry_waiting_capacity(self, needed: int = 1) -> bool:
+        return self.entry_waiting_count() + needed <= len(ENTRY_WAITING_SLOTS)
+
+    def entry_waiting_full_message(self) -> str:
+        return f"仮置きエリア（未配置）は上限{len(ENTRY_WAITING_SLOTS)}個です。\n先に仮置きエリア内のパレットを配置してから操作してください。"
+
+    def entry_waiting_slot_occupied(self, slot_x: float, slot_y: float, ignore: Optional[str] = None) -> bool:
+        for pallet in self.store.pallets:
+            if pallet.pallet_number == ignore or not self.store.is_entry_waiting_pallet(pallet):
+                continue
+            map_x = pallet.map_x if pallet.map_x is not None else ENTRY_MAP_X
+            map_y = pallet.map_y if pallet.map_y is not None else ENTRY_MAP_Y
+            if abs(map_x - slot_x) <= ENTRY_WAITING_TOLERANCE and abs(map_y - slot_y) <= ENTRY_WAITING_TOLERANCE:
+                return True
+        return False
+
     def find_entry_waiting_placement(self, pallet: PalletRecord) -> Tuple[str, float, float]:
+        if not self.has_entry_waiting_capacity(0 if self.store.is_entry_waiting_pallet(pallet) else 1):
+            raise ValueError(self.entry_waiting_full_message())
         for slot_x, slot_y in ENTRY_WAITING_SLOTS:
+            if self.entry_waiting_slot_occupied(slot_x, slot_y, ignore=pallet.pallet_number):
+                continue
             candidate_x, candidate_y = self.top_map.clamped_normalized_for_pallet(pallet, slot_x, slot_y)
-            if not self.pallet_would_collide(pallet, candidate_x, candidate_y, ENTRY_LOCATION):
-                return ENTRY_LOCATION, candidate_x, candidate_y
-
-        ranked_locations = sorted(
-            (location for location in self.store.locations if location not in self.store.blocked_locations),
-            key=lambda location: (
-                (self.top_map.normalized_position_for_location(location, pallet)[0] - ENTRY_MAP_X) ** 2
-                + (self.top_map.normalized_position_for_location(location, pallet)[1] - ENTRY_MAP_Y) ** 2
-            ),
-        )
-        for location in ranked_locations:
-            candidate_x, candidate_y = self.top_map.normalized_position_for_location(location, pallet)
-            if not self.pallet_would_collide(pallet, candidate_x, candidate_y, location):
-                return location, candidate_x, candidate_y
-
-        return ENTRY_LOCATION, ENTRY_MAP_X, ENTRY_WAITING_SLOTS[-1][1]
+            return ENTRY_LOCATION, candidate_x, candidate_y
+        raise ValueError(self.entry_waiting_full_message())
 
     def move_pallet(self, pallet_number: str, map_x: float, map_y: float, destination: str) -> None:
         pallet = self.store.get_pallet(pallet_number)
@@ -3377,12 +3408,19 @@ class MainWindow(QMainWindow):
         if len(members) <= 1:
             QMessageBox.information(self, "列を解除", "このパレットは単独なので解除する列がありません。")
             return
+        if not self.has_entry_waiting_capacity():
+            QMessageBox.warning(self, "列を解除", self.entry_waiting_full_message())
+            return
         pallet = selected_pallet
         remaining_members = [member for member in members if member.pallet_number != pallet.pallet_number]
         for index, member in enumerate(remaining_members):
             member.stack_order = index
             member.updated_at = now_text()
-        target_location, target_x, target_y = self.find_entry_waiting_placement(pallet)
+        try:
+            target_location, target_x, target_y = self.find_entry_waiting_placement(pallet)
+        except ValueError as exc:
+            QMessageBox.warning(self, "列を解除", str(exc))
+            return
         pallet.stack_order = 0
         pallet.location_code = target_location
         pallet.map_x, pallet.map_y = target_x, target_y
@@ -3391,7 +3429,7 @@ class MainWindow(QMainWindow):
         self.normalize_store_stacks()
         self.mark_store_dirty()
         self.refresh_all()
-        QMessageBox.information(self, "列を解除", "解除したパレットは入口へ移動しました。")
+        QMessageBox.information(self, "列を解除", "解除したパレットは仮置きエリア（未配置）へ移動しました。")
 
     def edit_selected_pallet(self) -> None:
         pallet = self.store.get_pallet(self.current_pallet_number or "")
@@ -3456,6 +3494,9 @@ class MainWindow(QMainWindow):
         target: Optional[PalletRecord] = None
         requested_target_number = ""
         if target_mode == "NEW":
+            if not self.has_entry_waiting_capacity():
+                QMessageBox.warning(self, "積み替え", self.entry_waiting_full_message())
+                return
             requested_target_number = target_ref
             target_number = self.store.unique_pallet_number(requested_target_number)
             location_code = ENTRY_LOCATION
@@ -3476,7 +3517,11 @@ class MainWindow(QMainWindow):
                 items=[transferred_item],
                 updated_at=now_text(),
             )
-            target.location_code, target.map_x, target.map_y = self.find_entry_waiting_placement(target)
+            try:
+                target.location_code, target.map_x, target.map_y = self.find_entry_waiting_placement(target)
+            except ValueError as exc:
+                QMessageBox.warning(self, "積み替え", str(exc))
+                return
             self.store.pallets.append(target)
         else:
             target = self.store.get_pallet(target_ref)
@@ -3505,11 +3550,18 @@ class MainWindow(QMainWindow):
         if payload is None: return
         requested_number, received_date, orientation, color_mode, last_manual_color_key, items = payload
         pallet_number = self.store.unique_pallet_number(requested_number)
+        if not self.has_entry_waiting_capacity():
+            QMessageBox.warning(self, "新規登録", self.entry_waiting_full_message())
+            return
         color_key = resolve_effective_color_key(color_mode, last_manual_color_key, items)
         location_code = ENTRY_LOCATION
         if location_code not in self.store.locations: self.store.locations.append(location_code)
         pallet = PalletRecord(pallet_number=pallet_number, location_code=location_code, received_date=received_date, color_key=color_key, color_mode=color_mode, last_manual_color_key=last_manual_color_key, stack_order=self.store.next_stack_order(location_code), orientation=orientation, map_x=ENTRY_MAP_X, map_y=ENTRY_MAP_Y, items=items, updated_at=now_text())
-        pallet.location_code, pallet.map_x, pallet.map_y = self.find_entry_waiting_placement(pallet)
+        try:
+            pallet.location_code, pallet.map_x, pallet.map_y = self.find_entry_waiting_placement(pallet)
+        except ValueError as exc:
+            QMessageBox.warning(self, "新規登録", str(exc))
+            return
         self.store.pallets.append(pallet)
         self.normalize_store_stacks()
         self.select_pallet(pallet_number); self.mark_store_dirty(); self.refresh_all()

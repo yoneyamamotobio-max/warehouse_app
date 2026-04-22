@@ -752,16 +752,16 @@
     },
     {
       "pallet_number": "SD",
-      "location_code": "J20",
+      "location_code": "J17",
       "received_date": "2026-04-15",
       "color_key": "RED",
       "color_mode": "AUTO",
       "last_manual_color_key": "GRAY",
       "stack_order": 0,
       "orientation": 0,
-      "map_x": 0.5,
-      "map_y": 1.08,
-      "updated_at": "2026-04-21 17:02:27",
+      "map_x": 0.475,
+      "map_y": 0.825,
+      "updated_at": "2026-04-22 15:33:56",
       "items": [
         {
           "line_id": "3914a8fdee8d480ebfdde261fb9e24ec",
@@ -777,16 +777,16 @@
     },
     {
       "pallet_number": "4534",
-      "location_code": "J20",
+      "location_code": "K14",
       "received_date": "2026-04-15",
       "color_key": "RED",
       "color_mode": "AUTO",
       "last_manual_color_key": "GRAY",
       "stack_order": 0,
       "orientation": 0,
-      "map_x": 0.42,
-      "map_y": 1.08,
-      "updated_at": "2026-04-21 17:05:13",
+      "map_x": 0.525,
+      "map_y": 0.675,
+      "updated_at": "2026-04-22 15:33:57",
       "items": [
         {
           "line_id": "89f5abe1655c4670b2522d3601b042d3",
