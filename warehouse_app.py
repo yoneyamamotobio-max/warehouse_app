@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QAbstractSpinBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QToolTip, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QAbstractSpinBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget, QToolTip, QVBoxLayout, QWidget
 
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
@@ -1629,6 +1629,7 @@ class TopMapWidget(QWidget):
     selectionCleared = Signal()
     palletDoubleClicked = Signal(str)
     blockedLocationToggled = Signal(str, bool)
+    palletContextRequested = Signal(str, QPoint)
 
     def __init__(self, store: InventoryStore, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1914,9 +1915,18 @@ class TopMapWidget(QWidget):
             painter.drawText(preview_rect, Qt.AlignCenter, self.drag_preview_location)
 
     def mousePressEvent(self, event) -> None:
+        point = event.position().toPoint()
+        if event.button() == Qt.RightButton:
+            for pallet_number, rect in self.pallet_rects.items():
+                if rect.contains(point):
+                    self.selected_pallet = pallet_number
+                    self.palletSelected.emit(pallet_number)
+                    self.palletContextRequested.emit(pallet_number, event.globalPosition().toPoint())
+                    self.update()
+                    return
+            return
         if event.button() != Qt.LeftButton:
             return
-        point = event.position().toPoint()
         if self.blocked_edit_mode:
             location = self.location_at(point)
             if location:
@@ -2046,6 +2056,7 @@ class IsometricMapWidget(QWidget):
     palletSelected = Signal(str)
     selectionCleared = Signal()
     palletDoubleClicked = Signal(str)
+    palletContextRequested = Signal(str, QPoint)
 
     def __init__(self, store: InventoryStore, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -2301,9 +2312,18 @@ class IsometricMapWidget(QWidget):
         self.setCursor(Qt.PointingHandCursor if hit else Qt.ArrowCursor); self.update()
 
     def mousePressEvent(self, event) -> None:
+        point = event.position().toPoint()
+        if event.button() == Qt.RightButton:
+            for pallet_number, rect in self.pallet_rects.items():
+                if rect.contains(point):
+                    self.selected_pallet = pallet_number
+                    self.palletSelected.emit(pallet_number)
+                    self.palletContextRequested.emit(pallet_number, event.globalPosition().toPoint())
+                    self.update()
+                    return
+            return
         if event.button() != Qt.LeftButton:
             return
-        point = event.position().toPoint()
         for pallet_number, rect in self.pallet_rects.items():
             if rect.contains(point):
                 self.selected_pallet = pallet_number; self.palletSelected.emit(pallet_number); self.update(); return
@@ -2430,8 +2450,8 @@ class MainWindow(QMainWindow):
         self.stack_detail_pages = QStackedWidget()
         self.stack_detail_pages.installEventFilter(self)
         detail_layout.addWidget(self.stack_detail_pages, 1)
-        self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.set_blocked_location_with_validation); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
-        self.iso_map = IsometricMapWidget(self.store); self.iso_map.palletSelected.connect(self.select_pallet); self.iso_map.selectionCleared.connect(self.clear_selection); self.iso_map.palletDoubleClicked.connect(self.open_selected_pallet_editor)
+        self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.set_blocked_location_with_validation); self.top_map.palletContextRequested.connect(self.open_pallet_context_menu); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
+        self.iso_map = IsometricMapWidget(self.store); self.iso_map.palletSelected.connect(self.select_pallet); self.iso_map.selectionCleared.connect(self.clear_selection); self.iso_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.iso_map.palletContextRequested.connect(self.open_pallet_context_menu)
         self.iso_rotate_button = QPushButton("視点90°")
         self.iso_rotate_button.setParent(self.iso_map)
         self.iso_rotate_button.clicked.connect(self.rotate_iso_view)
@@ -2442,6 +2462,7 @@ class MainWindow(QMainWindow):
         self.inventory_table.horizontalHeader().sectionClicked.connect(self.handle_inventory_header_click)
         self.shipment_table = QTableWidget(0, 10); self.shipment_table.setHorizontalHeaderLabels(["出庫日", "パレット番号", "品名", "品数", "総枚数", "総高さ", "最終位置", "入庫日", "色", "備考"])
         self.shipment_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.shipment_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.shipment_table.setContextMenuPolicy(Qt.CustomContextMenu); self.shipment_table.customContextMenuRequested.connect(self.open_shipment_context_menu)
         self.shipment_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch); self.shipment_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.Stretch); self.tabs.addTab(self.wrap_widget(self.shipment_table), "出庫一覧")
         self.help_page = self.build_help_page(); self.help_tab_widget = self.wrap_widget(self.help_page); self.tabs.addTab(self.help_tab_widget, "ヘルプ")
         self.update_tab_visuals()
@@ -2461,13 +2482,13 @@ class MainWindow(QMainWindow):
         sections = [
             ("基本操作", "1. 新規登録でパレット番号・入庫日・明細を入力\n2. 明細を追加してから OK で登録\n3. 登録直後は仮置きエリア（未配置）に入るため、真上ビューで保管場所へドラッグ移動"),
             ("仮置きエリア（未配置）", "新規登録・出庫復元・列解除・積み替えで作成した空パレットは仮置きエリアへ入ります。\n上限は10個です。上限に達した場合は、先に仮置きエリア内のパレットを倉庫内へ配置してください。\n仮置き中のパレットは、パレット数・明細数・総枚数・面積使用率にカウントしません。"),
-            ("位置変更", "真上ビューでパレットをドラッグ、またはタブレットでスワイプして移動します。\nある程度グリッドに吸着しますが、細かい位置調整もできます。\nパレットのない場所をクリックすると選択解除できます。"),
+            ("位置変更", "真上ビューでパレットをドラッグ、またはタブレットでスワイプして移動します。\nある程度グリッドに吸着しますが、細かい位置調整もできます。\nパレットのない場所をクリックすると選択解除できます。\nパレットを右クリックすると、編集・向き変更・段操作・列解除・積み替え・出庫のメニューを表示できます。"),
             ("積み重ね", "1ロケーション = 1スタック列です。同じロケーションに置いたパレットは同じ列として扱います。\n段を上げる / 下げるで同じ列の上下順を入れ替えます。\n列を解除は、選択中のパレットを1枚だけ外して仮置きエリア（未配置）へ移動します。"),
             ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n面積使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、面積使用率では1パレット列分としてカウントします。"),
             ("置けないマス設定", "置けないマス設定を押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
             ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\nパレット番号・入庫日・色・向き・明細の追加/削除/順番変更ができます。\n厚みと枚数は行内の +/- で調整できます。厚みが 3-3.5 のような範囲入力の場合、+/- は使えません。"),
             ("積み替え", "積み替えでは、選択中パレットの一部枚数を既存パレットまたは空パレットへ移動できます。\n同じ明細でも自動では合算しません。\n空パレットを作る場合は仮置きエリア（未配置）に作成されます。"),
-            ("出庫と復元", "出庫したパレットは真上ビューと在庫一覧から外れ、出庫一覧へ移ります。\n出庫履歴は削除または復元できます。\n復元すると元位置ではなく仮置きエリア（未配置）へ置かれます。"),
+            ("出庫と復元", "出庫したパレットは真上ビューと在庫一覧から外れ、出庫一覧へ移ります。\n出庫履歴はボタンまたは出庫一覧の右クリックメニューから削除・復元できます。\n復元すると元位置ではなく仮置きエリア（未配置）へ置かれます。"),
             ("45度ビュー", "45度ビューは立体確認用です。パレット移動は真上ビューで行います。\n視点90°で向きを切り替え、ドラッグで表示位置を動かせます。\n積み重ねは真上に積まれた状態で表示します。"),
             ("在庫一覧", "在庫一覧では列ヘッダーをクリックして並び替えできます。\n検索はスペース区切り AND 検索です。例: 39 LL 10 A\n一覧コピーでExcelへ貼り付けでき、棚卸データ出力では同じ品番・サイズ・厚み・加工・グレードを合計します。"),
             ("色の見方", "自動判別は明細内容で色を決めます。\nC/Cのみは紫、#38は赤、#39は青、#45は緑、#50は桃、#40は黄、混在やその他はグレーです。\n新規登録・編集では自動判別と手動指定を切り替えられます。"),
@@ -3040,6 +3061,27 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText("\n".join(lines))
         QMessageBox.information(self, "棚卸データ出力", "棚卸用の集計データをクリップボードへコピーしました。")
 
+    def open_shipment_context_menu(self, pos: QPoint) -> None:
+        row = self.shipment_table.rowAt(pos.y())
+        if row < 0:
+            return
+        selected_rows = {index.row() for index in self.shipment_table.selectionModel().selectedRows()}
+        if row not in selected_rows:
+            self.shipment_table.clearSelection()
+            self.shipment_table.selectRow(row)
+
+        selected_count = len(self.shipment_table.selectionModel().selectedRows())
+        menu = QMenu(self)
+        restore_action = menu.addAction("復元")
+        delete_action = menu.addAction("履歴削除")
+        restore_action.setEnabled(selected_count > 0)
+        delete_action.setEnabled(selected_count > 0)
+        selected_action = menu.exec(self.shipment_table.viewport().mapToGlobal(pos))
+        if selected_action == restore_action:
+            self.restore_selected_shipments()
+        elif selected_action == delete_action:
+            self.delete_selected_shipments()
+
     def delete_selected_shipments(self) -> None:
         rows = sorted({index.row() for index in self.shipment_table.selectionModel().selectedRows()})
         if not rows:
@@ -3182,6 +3224,44 @@ class MainWindow(QMainWindow):
             self.detail_frame_manual_position = None
         self.current_pallet_number = pallet_number
         self.top_map.selected_pallet = pallet_number; self.iso_map.selected_pallet = pallet_number; self.top_map.update(); self.iso_map.update(); self.refresh_detail()
+
+    def open_pallet_context_menu(self, pallet_number: str, global_pos: QPoint) -> None:
+        pallet = self.store.get_pallet(pallet_number)
+        if not pallet:
+            return
+        self.select_pallet(pallet_number)
+        members = self.store.group_members(pallet)
+        current_index = next((index for index, item in enumerate(members) if item.pallet_number == pallet_number), 0)
+
+        menu = QMenu(self)
+        edit_action = menu.addAction("明細編集")
+        rotate_action = menu.addAction("向き変更")
+        menu.addSeparator()
+        stack_up_action = menu.addAction("段を上げる")
+        stack_down_action = menu.addAction("段を下げる")
+        unstack_action = menu.addAction("列を解除")
+        stack_up_action.setEnabled(len(members) > 1 and current_index < len(members) - 1)
+        stack_down_action.setEnabled(len(members) > 1 and current_index > 0)
+        unstack_action.setEnabled(len(members) > 1)
+        menu.addSeparator()
+        transfer_action = menu.addAction("積み替え")
+        ship_action = menu.addAction("出庫")
+
+        selected_action = menu.exec(global_pos)
+        if selected_action == edit_action:
+            self.open_selected_pallet_editor(pallet_number)
+        elif selected_action == rotate_action:
+            self.rotate_selected_pallet()
+        elif selected_action == stack_up_action:
+            self.adjust_selected_stack(1)
+        elif selected_action == stack_down_action:
+            self.adjust_selected_stack(-1)
+        elif selected_action == unstack_action:
+            self.unstack_selected_pallet()
+        elif selected_action == transfer_action:
+            self.transfer_selected_pallet()
+        elif selected_action == ship_action:
+            self.ship_selected_pallet()
 
     def refresh_detail(self) -> None:
         pallet = self.store.get_pallet(self.current_pallet_number or "")
