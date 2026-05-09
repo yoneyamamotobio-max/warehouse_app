@@ -412,11 +412,11 @@
       "color_key": "BLUE",
       "color_mode": "AUTO",
       "last_manual_color_key": "BLUE",
-      "stack_order": 1,
+      "stack_order": 0,
       "orientation": 0,
       "map_x": 0.425,
       "map_y": 0.625,
-      "updated_at": "2026-04-23 17:38:39",
+      "updated_at": "2026-04-23 17:38:42",
       "items": [
         {
           "line_id": "f1d3d815f6534a23b4041e1aba0484da",
@@ -697,7 +697,7 @@
       "color_key": "BLUE",
       "color_mode": "AUTO",
       "last_manual_color_key": "GRAY",
-      "stack_order": 0,
+      "stack_order": 1,
       "orientation": 0,
       "map_x": 0.425,
       "map_y": 0.625,
@@ -912,20 +912,45 @@
     },
     {
       "pallet_number": "4141",
-      "location_code": "J20",
+      "location_code": "L8",
       "received_date": "2026-04-23",
       "color_key": "RED",
       "color_mode": "AUTO",
       "last_manual_color_key": "GRAY",
       "stack_order": 0,
       "orientation": 0,
-      "map_x": 0.5,
-      "map_y": 1.08,
-      "updated_at": "2026-04-23 17:09:06",
+      "map_x": 0.575,
+      "map_y": 0.375,
+      "updated_at": "2026-04-24 16:33:39",
       "items": [
         {
           "line_id": "5c5109ca435b4ed8bb904d013ac21442",
           "part_code": "38",
+          "size": "LL",
+          "thickness_mm": "10",
+          "finish_text": "S/S",
+          "grade": "A",
+          "sheet_count": 80,
+          "note": ""
+        }
+      ]
+    },
+    {
+      "pallet_number": "4456",
+      "location_code": "O7",
+      "received_date": "2026-04-24",
+      "color_key": "GRAY",
+      "color_mode": "MANUAL",
+      "last_manual_color_key": "GRAY",
+      "stack_order": 0,
+      "orientation": 0,
+      "map_x": 0.725,
+      "map_y": 0.325,
+      "updated_at": "2026-04-24 16:32:39",
+      "items": [
+        {
+          "line_id": "c506fdcd6a3b44dba24af2082032f687",
+          "part_code": "39",
           "size": "LL",
           "thickness_mm": "10",
           "finish_text": "S/S",
