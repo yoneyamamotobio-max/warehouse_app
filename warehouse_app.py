@@ -210,21 +210,33 @@ class InventoryStore:
         for location in DEFAULT_LOCATIONS:
             if location not in self.locations:
                 self.locations.append(location)
+        self.sync_pallet_locations_to_visible_grid()
 
     def is_entry_waiting_pallet(self, pallet: PalletRecord) -> bool:
         return normalize_location_code(pallet.location_code) == ENTRY_LOCATION and pallet.map_y is not None and pallet.map_y > 1.0
 
+    def pallets_at_location(self, location_code: str) -> List[PalletRecord]:
+        location_code = visible_location_code(location_code)
+        return [
+            pallet
+            for pallet in self.pallets
+            if current_visible_location_for_pallet(pallet) == location_code and not self.is_entry_waiting_pallet(pallet)
+        ]
+
     def has_pallet_at_location(self, location_code: str) -> bool:
-        location_code = normalize_location_code(location_code)
-        return any(normalize_location_code(pallet.location_code) == location_code for pallet in self.pallets)
+        return bool(self.pallets_at_location(location_code))
 
     def set_blocked_location_with_validation(self, location_code: str, blocked: bool) -> bool:
         raw_location = str(location_code or "").strip()
         if not raw_location:
             return False
         location_code = normalize_location_code(raw_location)
-        if blocked and self.has_pallet_at_location(location_code):
-            raise ValueError(f"{location_code} には既にパレットがあるため、置けないマスにはできません。")
+        if blocked:
+            pallets = self.pallets_at_location(location_code)
+            if pallets:
+                pallet_numbers = ", ".join(pallet.pallet_number for pallet in pallets[:6])
+                more = "" if len(pallets) <= 6 else f" 他 {len(pallets) - 6} 件"
+                raise ValueError(f"{location_code} には既にパレット {pallet_numbers}{more} があるため、置けないマスにはできません。")
 
         changed = False
         if blocked:
@@ -246,7 +258,14 @@ class InventoryStore:
             except ValueError:
                 continue
 
+    def sync_pallet_locations_to_visible_grid(self) -> None:
+        for pallet in self.pallets:
+            visible_code = current_visible_location_for_pallet(pallet)
+            if visible_code and normalize_location_code(pallet.location_code) != visible_code:
+                pallet.location_code = visible_code
+
     def normalize_stacks(self) -> None:
+        self.sync_pallet_locations_to_visible_grid()
         groups: Dict[str, List[PalletRecord]] = {}
         for pallet in self.pallets:
             if self.is_entry_waiting_pallet(pallet):
@@ -575,6 +594,16 @@ def visible_location_code(location: str) -> str:
 
 def location_stack_label(pallet: PalletRecord) -> str:
     return f"{visible_location_code(pallet.location_code)}-{max(1, pallet.stack_order + 1)}"
+
+
+def current_visible_location_for_pallet(pallet: PalletRecord) -> Optional[str]:
+    if normalize_location_code(pallet.location_code) == ENTRY_LOCATION and pallet.map_y is not None and pallet.map_y > 1.0:
+        return None
+    if pallet.map_x is not None and pallet.map_y is not None and pallet.map_y <= 1.0:
+        col = min(GRID_COLUMNS - 1, max(0, int(round(pallet.map_x * GRID_COLUMNS - 0.5))))
+        row = min(GRID_ROWS - 1, max(0, int(round(pallet.map_y * GRID_ROWS - 0.5))))
+        return f"{column_label(col)}{row + 1}"
+    return visible_location_code(pallet.location_code)
 
 
 def column_code_from_location(location: str) -> str:
@@ -2843,6 +2872,10 @@ class MainWindow(QMainWindow):
         self.detail_drag_active = False
         self.detail_drag_offset = QPoint()
         self.detail_frame_manual_position: Optional[QPoint] = None
+        self.detail_frame_manual_size: Optional[Tuple[int, int]] = None
+        self.detail_resize_active = False
+        self.detail_resize_origin = QPoint()
+        self.detail_resize_start_size: Optional[Tuple[int, int]] = None
         self.store_dirty = False
         self.setWindowTitle("Warehouse Management App - PySide6"); self.resize(1480, 920); self.setMinimumSize(900, 620)
         if ICON_PATH.exists():
@@ -2893,10 +2926,13 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self.handle_tab_changed)
         self.detail_frame = QFrame(self.map_container); self.detail_frame.hide()
         self.detail_frame.installEventFilter(self)
+        detail_root = QVBoxLayout()
+        detail_root.setContentsMargins(10, 8, 10, 8)
+        detail_root.setSpacing(6)
         detail_layout = QHBoxLayout()
-        detail_layout.setContentsMargins(10, 8, 10, 8)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
         detail_layout.setSpacing(8)
-        self.detail_frame.setLayout(detail_layout)
+        self.detail_frame.setLayout(detail_root)
         self.stack_detail_selector = QListWidget()
         self.stack_detail_selector.setObjectName("stackDetailSelector")
         self.stack_detail_selector.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -2911,6 +2947,17 @@ class MainWindow(QMainWindow):
         self.stack_detail_pages = QStackedWidget()
         self.stack_detail_pages.installEventFilter(self)
         detail_layout.addWidget(self.stack_detail_pages, 1)
+        detail_root.addLayout(detail_layout, 1)
+        self.detail_resize_handle = QFrame()
+        self.detail_resize_handle.setObjectName("detailResizeHandle")
+        self.detail_resize_handle.setFixedSize(18, 18)
+        self.detail_resize_handle.setCursor(Qt.SizeFDiagCursor)
+        self.detail_resize_handle.installEventFilter(self)
+        resize_row = QHBoxLayout()
+        resize_row.setContentsMargins(0, 0, 0, 0)
+        resize_row.addStretch(1)
+        resize_row.addWidget(self.detail_resize_handle)
+        detail_root.addLayout(resize_row)
         self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.set_blocked_location_with_validation); self.top_map.palletContextRequested.connect(self.open_pallet_context_menu); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
         self.iso_map = IsometricMapWidget(self.store); self.iso_map.palletSelected.connect(self.select_pallet); self.iso_map.selectionCleared.connect(self.clear_selection); self.iso_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.iso_map.palletContextRequested.connect(self.open_pallet_context_menu)
         self.iso_rotate_button = QPushButton("視点90°")
@@ -3069,7 +3116,7 @@ class MainWindow(QMainWindow):
             f"QListWidget#stackDetailSelector::item:selected {{ background:{border_color}; color:#10161e; }}"
         )
         self.stack_detail_pages.setStyleSheet(
-            f"QLabel {{ color:#fff7d6; font:{'8pt' if narrow else ('8.5pt' if compact else '9pt')} 'Yu Gothic UI'; }}"
+            f"QLabel {{ color:#fff7d6; font:{'9pt' if narrow else ('9.5pt' if compact else '10pt')} 'Yu Gothic UI'; }}"
         )
 
     def update_tab_visuals(self) -> None:
@@ -3113,6 +3160,7 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, source, event) -> bool:
         detail_frame = getattr(self, "detail_frame", None)
+        detail_resize_handle = getattr(self, "detail_resize_handle", None)
         stack_detail_pages = getattr(self, "stack_detail_pages", None)
         stack_detail_selector = getattr(self, "stack_detail_selector", None)
         map_container = getattr(self, "map_container", None)
@@ -3124,6 +3172,24 @@ class MainWindow(QMainWindow):
         if current_scroll is not None:
             draggable_sources.add(current_scroll)
             draggable_sources.add(current_scroll.viewport())
+        if event.type() == QEvent.MouseButtonPress and source == detail_resize_handle and event.button() == Qt.LeftButton:
+            self.detail_resize_active = True
+            self.detail_resize_origin = event.globalPosition().toPoint()
+            if detail_frame is not None:
+                self.detail_resize_start_size = (detail_frame.width(), detail_frame.height())
+            return True
+        if event.type() == QEvent.MouseMove and self.detail_resize_active and source == detail_resize_handle and detail_frame is not None and map_container is not None and tabs is not None and (event.buttons() & Qt.LeftButton):
+            start_width, start_height = self.detail_resize_start_size or (detail_frame.width(), detail_frame.height())
+            delta = event.globalPosition().toPoint() - self.detail_resize_origin
+            min_width = 260
+            min_height = 120
+            max_width = max(min_width, map_container.width() - detail_frame.x() - 14)
+            max_height = max(min_height, map_container.height() - detail_frame.y() - 14)
+            new_width = max(min_width, min(max_width, start_width + delta.x()))
+            new_height = max(min_height, min(max_height, start_height + delta.y()))
+            detail_frame.resize(new_width, new_height)
+            self.detail_frame_manual_size = (new_width, new_height)
+            return True
         if event.type() == QEvent.MouseButtonPress and source in draggable_sources and event.button() == Qt.LeftButton:
             self.detail_drag_active = True
             if detail_frame is not None:
@@ -3140,6 +3206,7 @@ class MainWindow(QMainWindow):
             return True
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
             self.detail_drag_active = False
+            self.detail_resize_active = False
         if event.type() == QEvent.MouseButtonDblClick and stack_detail_pages is not None and stack_detail_selector is not None:
             watched = {detail_frame, stack_detail_selector, stack_detail_selector.viewport(), stack_detail_pages}
             if current_page is not None:
@@ -3218,7 +3285,6 @@ class MainWindow(QMainWindow):
         widget_top_left = active_widget.mapTo(self.map_container, QPoint(0, 0))
         anchor_left = widget_top_left.x() + anchor_rect.right() + 12
         anchor_top = widget_top_left.y() + anchor_rect.top()
-        width = 360 if self.width() >= 1200 else 310
         current_page = self.stack_detail_pages.currentWidget()
         detail_label = current_page.findChild(QLabel) if current_page is not None else None
         line_count = max(1, (detail_label.text().count("\n") + 1) if detail_label is not None else 4)
@@ -3227,7 +3293,14 @@ class MainWindow(QMainWindow):
         top_limit = self.tabs.tabBar().height() + 12
         available_height = max(140, self.map_container.height() - top_limit - 14)
         preferred_height = max(120, 28 + (line_count * line_height))
-        detail_height = min(preferred_height, available_height)
+        default_width = 360 if self.width() >= 1200 else 310
+        if self.detail_frame_manual_size is not None:
+            manual_width, manual_height = self.detail_frame_manual_size
+            width = max(260, min(manual_width, max(260, self.map_container.width() - selector_width - 24)))
+            detail_height = max(120, min(manual_height, available_height))
+        else:
+            width = default_width
+            detail_height = min(preferred_height, available_height)
         if self.detail_frame_manual_position is not None:
             x = self.detail_frame_manual_position.x()
             y = self.detail_frame_manual_position.y()
@@ -3320,6 +3393,15 @@ class MainWindow(QMainWindow):
             border:1px solid #24425e;
             border-radius:6px;
             padding:6px 8px;
+        }
+        QFrame#detailResizeHandle {
+            background:#18304b;
+            border:1px solid #5f7890;
+            border-radius:4px;
+        }
+        QFrame#detailResizeHandle:hover {
+            background:#244b72;
+            border-color:#8fc7ff;
         }
         QTabWidget::pane { border:1px solid #1a3c60; background:#07111f; }
         QTabBar::tab { background:#11253d; color:#88c3f0; padding:10px 16px; margin-right:4px; border-top-left-radius:6px; border-top-right-radius:6px; }
