@@ -27,6 +27,7 @@ DATA_PATH = APP_DIR / "inventory-data.json"
 ICON_PATH = APP_DIR / "icon.ico"
 STORE_LOG_PATH = APP_DIR / "store-error.log"
 APP_ID = "Yone.WarehouseApp"
+DAILY_BACKUP_RETENTION_DAYS = 90
 GRID_COLUMNS = 16
 GRID_ROWS = 20
 COLOR_PRESETS = {
@@ -381,6 +382,10 @@ def save_store(store: InventoryStore, path: Path = DATA_PATH) -> None:
     bak_path = path.with_suffix(path.suffix + ".bak")
     bak_tmp_path = path.with_suffix(path.suffix + ".bak.tmp")
     try:
+        try:
+            create_daily_backup(path)
+        except Exception:
+            log_store_error(f"daily backup failed: {path}\n{traceback.format_exc()}")
         payload_text = json.dumps(store.to_dict(), ensure_ascii=False, indent=2)
         with tmp_path.open("w", encoding="utf-8") as handle:
             handle.write(payload_text)
@@ -404,6 +409,42 @@ def save_store(store: InventoryStore, path: Path = DATA_PATH) -> None:
                     cleanup_path.unlink()
             except Exception:
                 log_store_error(f"temporary file cleanup failed: {cleanup_path}\n{traceback.format_exc()}")
+
+
+def create_daily_backup(path: Path = DATA_PATH) -> None:
+    if not path.exists():
+        return
+    backup_dir = path.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_path = backup_dir / f"{path.stem}-{datetime.now():%Y-%m-%d}{path.suffix}"
+    if backup_path.exists():
+        prune_old_daily_backups(path)
+        return
+    shutil.copy2(path, backup_path)
+    prune_old_daily_backups(path)
+
+
+def prune_old_daily_backups(path: Path = DATA_PATH, retention_days: int = DAILY_BACKUP_RETENTION_DAYS) -> None:
+    if retention_days <= 0:
+        return
+    backup_dir = path.parent / "backups"
+    if not backup_dir.exists():
+        return
+    cutoff = datetime.now().date().toordinal() - retention_days
+    pattern = re.compile(rf"^{re.escape(path.stem)}-(\d{{4}}-\d{{2}}-\d{{2}}){re.escape(path.suffix)}$")
+    for candidate in backup_dir.glob(f"{path.stem}-*{path.suffix}"):
+        match = pattern.match(candidate.name)
+        if not match:
+            continue
+        try:
+            backup_date = datetime.strptime(match.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if backup_date.toordinal() < cutoff:
+            try:
+                candidate.unlink()
+            except Exception:
+                log_store_error(f"daily backup prune failed: {candidate}\n{traceback.format_exc()}")
 
 
 def log_store_error(message: str) -> None:
@@ -543,7 +584,10 @@ def is_valid_part_code(part_code: str) -> bool:
 
 
 def normalize_finish_text(text: str) -> str:
-    return re.sub(r"\s+", " ", normalize_text(text)).strip().upper()
+    normalized = normalize_text(text)
+    for ch in ["￥", "¥", "\\", "。", "？", "?"]:
+        normalized = normalized.replace(ch, "/")
+    return re.sub(r"\s+", " ", normalized).strip().upper()
 
 
 def normalize_note(text: str) -> str:
@@ -1001,7 +1045,9 @@ class HintedTableDelegate(QStyledItemDelegate):
     def normalize_editor_value(self, editor: QWidget, column: int, rule: Dict[str, bool]) -> None:
         if not hasattr(editor, "text") or not hasattr(editor, "setText"):
             return
-        if rule.get("thickness", False):
+        if rule.get("finish", False):
+            normalized = normalize_finish_text(editor.text())
+        elif rule.get("thickness", False):
             normalized = normalize_thickness_text_value(editor.text())
         elif column in self.digits_only_columns:
             normalized = normalize_count_input(editor.text())
@@ -1083,6 +1129,7 @@ class ReorderTableWidget(QTableWidget):
         self._press_pos = QPoint()
         self.rows_changed_callback = None
         self.setMouseTracking(True)
+        self.itemSelectionChanged.connect(self.update_drag_feedback)
 
     def row_snapshot(self) -> List[List[str]]:
         rows: List[List[str]] = []
@@ -1105,6 +1152,7 @@ class ReorderTableWidget(QTableWidget):
             self.setCurrentCell(current_row, 0)
         if callable(self.rows_changed_callback):
             self.rows_changed_callback()
+        self.update_drag_feedback()
 
     def move_row(self, source_row: int, target_row: int) -> None:
         if source_row < 0 or source_row >= self.rowCount():
@@ -1150,6 +1198,7 @@ class ReorderTableWidget(QTableWidget):
         super().leaveEvent(event)
 
     def update_drag_feedback(self) -> None:
+        selected_rows = {index.row() for index in self.selectionModel().selectedRows()} if self.selectionModel() is not None else set()
         for row in range(self.rowCount()):
             for col in range(self.columnCount()):
                 item = self.item(row, col)
@@ -1161,6 +1210,9 @@ class ReorderTableWidget(QTableWidget):
                 elif row == self._hover_row and self._drag_row >= 0:
                     item.setBackground(QColor("#163450"))
                     item.setForeground(QColor("#dff6ff"))
+                elif row in selected_rows:
+                    item.setBackground(QColor("#245f99"))
+                    item.setForeground(QColor("#ffffff"))
                 else:
                     item.setBackground(QColor("#06101c"))
                     item.setForeground(QColor("#f6fbff"))
@@ -1216,13 +1268,23 @@ class ThicknessLineEdit(AutoNormalizeLineEdit):
         request_software_keyboard(self)
 
     def can_step(self) -> bool:
-        return is_single_thickness(self.text())
+        return is_valid_thickness(self.text())
 
     def step_by(self, steps: int) -> None:
         if not self.can_step():
             return
         current = parse_thickness_value(self.text())
         self.setText(format_thickness_value(current + steps))
+
+
+class FinishClearOnFocusLineEdit(AutoNormalizeClearOnFocusLineEdit):
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None) -> None:
+        super().__init__(text, parent, uppercase=False, remove_spaces=False)
+
+    def normalize_value(self) -> None:
+        normalized = normalize_finish_text(self.text())
+        if normalized != self.text():
+            self.setText(normalized)
 
 
 class CountLineEdit(AutoNormalizeLineEdit):
@@ -1321,7 +1383,7 @@ class RegistrationDialog(QDialog):
         self.size = QComboBox(); self.size.addItems(VALID_SIZES)
         self.size.setCurrentText("LL")
         self.thickness = ThicknessLineEdit("10")
-        self.finish = AutoNormalizeClearOnFocusLineEdit("S/S", uppercase=True, remove_spaces=True)
+        self.finish = FinishClearOnFocusLineEdit("S/S")
         self.grade = QComboBox(); self.grade.setEditable(True); self.grade.addItems(VALID_GRADES)
         self.grade.setCurrentText("A")
         self.sheet_count = CountLineEdit("80")
@@ -1377,6 +1439,14 @@ class RegistrationDialog(QDialog):
         self.update_color_controls()
         self.refresh_item_editor_buttons()
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.Cancel)
+        if ok_button is not None:
+            ok_button.setDefault(False)
+            ok_button.setAutoDefault(False)
+        if cancel_button is not None:
+            cancel_button.setDefault(False)
+            cancel_button.setAutoDefault(False)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
 
     def create_step_control(self, editor: QWidget, step_up, step_down, enabled_check) -> QWidget:
@@ -1412,6 +1482,9 @@ class RegistrationDialog(QDialog):
             button.setFocusPolicy(Qt.NoFocus)
             button.setToolTip(tooltip)
             button.setStyleSheet(button_style)
+            button.setAutoRepeat(True)
+            button.setAutoRepeatDelay(350)
+            button.setAutoRepeatInterval(80)
             button_column.addWidget(button)
         up_button.clicked.connect(step_up)
         down_button.clicked.connect(step_down)
@@ -1427,7 +1500,7 @@ class RegistrationDialog(QDialog):
 
     def update_preview(self) -> None:
         part = normalize_part_code(self.part_code.text()) or "38"
-        finish = normalize_text(self.finish.text()) or "S/S"
+        finish = normalize_finish_text(self.finish.text()) or "S/S"
         grade = self.grade.currentText().strip() or "A"
         thickness = normalize_thickness_input(self.thickness.text()) or "10"
         quantity_text = normalize_count_input(self.sheet_count.text()) or "80"
@@ -1615,6 +1688,12 @@ class RegistrationDialog(QDialog):
             return
         super().accept()
 
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
 
 class EditPalletDialog(QDialog):
     ORDER_COL = 0
@@ -1690,7 +1769,7 @@ class EditPalletDialog(QDialog):
             self.SIZE_COL: {"uppercase": True, "remove_spaces": True},
             self.THICKNESS_COL: {"thickness": True},
             self.GRADE_COL: {"uppercase": True, "remove_spaces": True},
-            self.FINISH_COL: {"uppercase": True, "remove_spaces": True},
+            self.FINISH_COL: {"finish": True},
         }, {self.SHEET_COL}, self.item_table))
         self.item_table.setHorizontalHeaderLabels(["順", "品番", "サイズ", "厚み", "", "", "加工 / 裏表", "グレード", "枚数", "", "", "備考"])
         self.item_table.rows_changed_callback = self.refresh_item_order_labels
@@ -1726,6 +1805,14 @@ class EditPalletDialog(QDialog):
             self.item_table.setCurrentCell(0, self.PART_COL)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.Cancel)
+        if ok_button is not None:
+            ok_button.setDefault(False)
+            ok_button.setAutoDefault(False)
+        if cancel_button is not None:
+            cancel_button.setDefault(False)
+            cancel_button.setAutoDefault(False)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
 
     def add_row(self, item: Optional[InventoryItemLine] = None, insert_at_top: bool = False) -> None:
@@ -1758,9 +1845,10 @@ class EditPalletDialog(QDialog):
                 button_item.setBackground(QColor("#12304d"))
                 button_item.setForeground(QColor("#dff6ff"))
             self.refresh_thickness_step_buttons(row)
+        self.item_table.update_drag_feedback()
 
     def refresh_thickness_step_buttons(self, row: int) -> None:
-        enabled = is_single_thickness(self.cell_text(row, self.THICKNESS_COL))
+        enabled = is_valid_thickness(self.cell_text(row, self.THICKNESS_COL))
         for col in [self.THICKNESS_DOWN_COL, self.THICKNESS_UP_COL]:
             button_item = self.item_table.item(row, col)
             if button_item is None:
@@ -1771,6 +1859,7 @@ class EditPalletDialog(QDialog):
             button_item.setFlags(flags)
             button_item.setBackground(QColor("#12304d" if enabled else "#263142"))
             button_item.setForeground(QColor("#dff6ff" if enabled else "#75879b"))
+        self.item_table.update_drag_feedback()
 
     def handle_item_table_item_changed(self, item: QTableWidgetItem) -> None:
         if item.column() == self.THICKNESS_COL:
@@ -1793,7 +1882,7 @@ class EditPalletDialog(QDialog):
         if row < 0 or row >= self.item_table.rowCount():
             return
         current = self.cell_text(row, self.THICKNESS_COL) or "10"
-        if not is_single_thickness(current):
+        if not is_valid_thickness(current):
             return
         next_value = format_thickness_value(parse_thickness_value(current) + delta)
         self.set_cell_text(row, self.THICKNESS_COL, next_value)
@@ -1863,7 +1952,7 @@ class EditPalletDialog(QDialog):
                 part_code=normalize_part_code(part_code),
                 size=(normalize_text(size).upper() or "LL"),
                 thickness_mm=(normalize_thickness_input(thickness) or "10"),
-                finish_text=(normalize_text(finish_text) or "S/S"),
+                finish_text=(normalize_finish_text(finish_text) or "S/S"),
                 grade=(normalize_text(grade) or "A"),
                 sheet_count=int(normalized_sheet_count) if normalized_sheet_count.isdigit() else 1,
                 note=normalize_note(note)[:20],
@@ -1930,6 +2019,12 @@ class EditPalletDialog(QDialog):
         if self.payload() is None:
             return
         super().accept()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class TransferDialog(QDialog):
@@ -2965,7 +3060,7 @@ class MainWindow(QMainWindow):
         self.iso_rotate_button.clicked.connect(self.rotate_iso_view)
         self.iso_rotate_button.raise_()
         self.tabs.addTab(self.wrap_widget(self.iso_map), "45度ビュー")
-        self.inventory_table = QTableWidget(0, 8); self.inventory_table.setObjectName("inventoryTable"); self.inventory_table.setHorizontalHeaderLabels(["品番", "サイズ", "厚み", "加工 / 裏表", "グレード", "総枚数", "保管場所", "パレット番号"])
+        self.inventory_table = QTableWidget(0, 9); self.inventory_table.setObjectName("inventoryTable"); self.inventory_table.setHorizontalHeaderLabels(["パレット番号", "品番", "サイズ", "厚み", "加工 / 裏表", "グレード", "総枚数", "保管場所", "入庫日"])
         inventory_header = TouchFriendlyHeaderView(Qt.Horizontal, self.inventory_table)
         self.inventory_table.setHorizontalHeader(inventory_header)
         self.inventory_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -2977,14 +3072,15 @@ class MainWindow(QMainWindow):
         self.inventory_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.inventory_table.horizontalHeader().setMinimumSectionSize(72)
         self.inventory_table.horizontalHeader().setMinimumHeight(38)
-        self.inventory_table.setColumnWidth(0, 88)
-        self.inventory_table.setColumnWidth(1, 70)
-        self.inventory_table.setColumnWidth(2, 76)
-        self.inventory_table.setColumnWidth(3, 120)
-        self.inventory_table.setColumnWidth(4, 76)
+        self.inventory_table.setColumnWidth(0, 180)
+        self.inventory_table.setColumnWidth(1, 88)
+        self.inventory_table.setColumnWidth(2, 70)
+        self.inventory_table.setColumnWidth(3, 76)
+        self.inventory_table.setColumnWidth(4, 120)
         self.inventory_table.setColumnWidth(5, 76)
-        self.inventory_table.setColumnWidth(6, 180)
+        self.inventory_table.setColumnWidth(6, 76)
         self.inventory_table.setColumnWidth(7, 180)
+        self.inventory_table.setColumnWidth(8, 150)
         self.inventory_hint = QLabel("列幅は項目名の境目をドラッグで調整できます。ダブルクリックで真上ビューの位置を確認できます。")
         self.inventory_hint.setObjectName("inventoryHint")
         self.inventory_hint.setWordWrap(True)
@@ -3034,23 +3130,62 @@ class MainWindow(QMainWindow):
         body = QWidget()
         layout = QVBoxLayout(body)
         layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
+        layout.setSpacing(14)
 
         sections = [
+            (
+                "入力ルール",
+                """
+                <div style="font-size:11pt; line-height:1.7;">
+                  <div style="font-weight:700; color:#7fd0ff; font-size:13pt; margin-bottom:6px;">入力ルール</div>
+                  <div style="margin-bottom:10px;">全角で入力しても、自動で半角へ変換される項目があります。備考以外は保存時にルールチェックが入ります。</div>
+
+                  <div style="font-weight:700; color:#ffe28a; margin:8px 0 4px 0;">■ 品番・パレット番号</div>
+                  <div>・全角英数字は自動で半角へ変換</div>
+                  <div>・英字は大文字へ変換</div>
+                  <div>・日本語は入力不可</div>
+                  <div style="margin-top:4px; color:#b9d8f5;">例: <code>３９</code> → <code>39</code> / <code>ｐ００１</code> → <code>P001</code></div>
+                  <div style="color:#ffb0b7;">NG: <code>テスト</code> / <code>品番39</code></div>
+
+                  <div style="font-weight:700; color:#ffe28a; margin:10px 0 4px 0;">■ 加工 / 裏表</div>
+                  <div>・日本語OK</div>
+                  <div>・英数字は半角大文字へ変換</div>
+                  <div>・<code>￥</code> <code>\</code> <code>。</code> <code>？</code> <code>?</code> は <code>/</code> に変換</div>
+                  <div style="margin-top:4px; color:#b9d8f5;">例: <code>ｓ／ｓ</code> → <code>S/S</code> / <code>Ｃ￥Ｃ</code> → <code>C/C</code> / <code>Ｓ。Ｓ</code> → <code>S/S</code> / <code>エンボスｓ／ｓ</code> → <code>エンボスS/S</code></div>
+
+                  <div style="font-weight:700; color:#ffe28a; margin:10px 0 4px 0;">■ 厚み(mm)</div>
+                  <div>・全角数字は半角へ変換</div>
+                  <div>・<code>、</code> <code>・</code> <code>,</code> は小数点として扱う</div>
+                  <div>・<code>3-3.5</code> や <code>3~3.5</code> の範囲表記OK</div>
+                  <div>・高さ計算は最大値を使用</div>
+                  <div style="margin-top:4px; color:#b9d8f5;">例: <code>５、５</code> → <code>5.5</code> / <code>３－３．５</code> → <code>3-3.5</code></div>
+                  <div style="color:#ffb0b7;">NG: <code>約3.5</code> / <code>3mm</code> / <code>あいうえお</code></div>
+
+                  <div style="font-weight:700; color:#ffe28a; margin:10px 0 4px 0;">■ 枚数</div>
+                  <div>・全角数字は半角へ変換</div>
+                  <div>・数字のみ入力可能</div>
+                  <div style="margin-top:4px; color:#b9d8f5;">例: <code>８０</code> → <code>80</code></div>
+                  <div style="color:#ffb0b7;">NG: <code>80枚</code> / <code>abc</code></div>
+
+                  <div style="font-weight:700; color:#ffe28a; margin:10px 0 4px 0;">■ 備考</div>
+                  <div>・日本語OK</div>
+                  <div>・20文字以内</div>
+                </div>
+                """,
+            ),
             ("基本操作", "1. 新規登録でパレット番号・入庫日・明細を入力\n2. 明細を追加してから OK で登録\n3. 登録直後は仮置きエリア（未配置）に入るため、真上ビューで保管場所へドラッグ移動"),
             ("仮置きエリア（未配置）", "新規登録・出庫復元・列解除・積み替えで作成した空パレットは仮置きエリアへ入ります。\n上限は10個です。上限に達した場合は、先に仮置きエリア内のパレットを倉庫内へ配置してください。\n仮置き中のパレットは、パレット数・明細数・総枚数・面積使用率にカウントしません。"),
             ("位置変更", "真上ビューでパレットをドラッグ、またはタブレットでスワイプして移動します。\n2本指ピンチで拡大縮小できます。\nある程度グリッドに吸着しますが、細かい位置調整もできます。\nパレットのない場所をクリックすると選択解除できます。\nパレットを右クリックすると、編集・向き変更・段操作・列解除・積み替え・出庫のメニューを表示できます。"),
             ("積み重ね", "1ロケーション = 1スタック列です。同じロケーションに置いたパレットは同じ列として扱います。\n段を上げる / 下げるで同じ列の上下順を入れ替えます。\n列を解除は、選択中のパレットを1枚だけ外して仮置きエリア（未配置）へ移動します。"),
             ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n面積使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、面積使用率では1パレット列分としてカウントします。"),
             ("置けないマス設定", "置けないマス設定を押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
-            ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\nパレット番号・入庫日・色・向き・明細の追加/削除/順番変更ができます。\n厚みと枚数は行内の +/- で調整できます。厚みが 3-3.5 のような範囲入力の場合、+/- は使えません。"),
+            ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\nパレット番号・入庫日・色・向き・明細の追加/削除/順番変更ができます。\n厚みと枚数は行内の +/- で調整できます。厚みが 3-3.5 のような範囲入力でも、+/- を使うと最大値基準の単一値へ切り替えて調整します。"),
             ("積み替え", "積み替えでは、選択中パレットの一部枚数を既存パレットまたは空パレットへ移動できます。\n同じ明細でも自動では合算しません。\n空パレットを作る場合は仮置きエリア（未配置）に作成されます。"),
             ("出庫と復元", "出庫したパレットは真上ビューと在庫一覧から外れ、出庫一覧へ移ります。\n出庫履歴はボタンまたは出庫一覧の右クリックメニューから削除・復元できます。\n復元すると元位置ではなく仮置きエリア（未配置）へ置かれます。"),
             ("45度ビュー", "45度ビューは立体確認用です。パレット移動は真上ビューで行います。\n視点90°で向きを切り替え、ドラッグまたはタブレットの1本指操作で表示位置を動かせます。\n2本指ピンチで拡大縮小できます。\n積み重ねは真上に積まれた状態で表示します。"),
             ("在庫一覧", "在庫一覧では列ヘッダーをクリックして並び替えできます。\n検索はスペース区切り AND 検索です。例: 39 LL 10 A\n行をダブルクリックすると真上ビューへ切り替わり、該当パレットを強調表示します。まとめ行に複数パレットが含まれる場合は、該当パレットをまとめて強調表示します。\n一覧コピーでExcelへ貼り付けでき、棚卸データ出力では同じ品番・サイズ・厚み・加工・グレードを合計します。"),
-            ("入力ルール", "新規登録とパレット編集は同じ入力ルールです。\nパレット番号・品番・厚み・枚数は半角入力が基本ですが、全角英数字で入力しても確定時に半角へ正規化します。例: ３９ → 39、８０ → 80\n加工 / 裏表は日本語入力できます。英数字や記号は半角寄りに正規化し、例: ｓ／ｓ → S/S、ｃ／ｃ → C/C、エンボス ｓ／ｓ → エンボス S/S になります。\n厚みは 5、5 / 5・5 / 5,5 のような入力も 5.5 に正規化します。3-3.5 や 3~3.5 は範囲表記のまま保存され、高さ計算だけ最大値を使います。\n日本語を使えるのは加工 / 裏表と備考欄です。品番・厚み・枚数に日本語や不要な文字が入っている場合は、登録・保存時にエラーになります。"),
             ("色の見方", "自動判別は明細内容で色を決めます。\nC/Cのみは紫、#38は赤、#39は青、#45は緑、#50は桃、#40は黄、混在やその他はグレーです。\n新規登録・編集では自動判別と手動指定を切り替えられます。"),
-            ("保存と共有", "編集確定・登録確定・移動完了・積み替え確定・出庫確定など、データ変更が確定した時に保存します。\n保存に失敗した場合は再試行または別名保存を選べます。\nデータ共有は Export / Import を使います。Import は現在データを上書きするため確認が出ます。"),
+            ("保存と共有", "編集確定・登録確定・移動完了・積み替え確定・出庫確定など、データ変更が確定した時に保存します。\n保存に失敗した場合は再試行または別名保存を選べます。\n日次バックアップは backups フォルダへ自動保存されます。ファイル名は inventory-data-YYYY-MM-DD.json 形式で、同じ日は1回だけ作成し、その日最初に保存する前の状態を残します。\nデータ共有は Export / Import を使います。Import は現在データを上書きするため確認が出ます。"),
             ("困った時", "位置や段順が変に見える場合は、まず真上ビューでロケーションと積み段を確認してください。\nデータ読込エラーや保存エラーは store-error.log に記録されます。\n本体とバックアップの両方が読めない場合は、復旧ダイアログを表示して起動を停止します。"),
         ]
 
@@ -3060,13 +3195,15 @@ class MainWindow(QMainWindow):
         for heading, text in sections:
             card = QFrame()
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(12, 10, 12, 10)
-            card_layout.setSpacing(6)
+            card_layout.setContentsMargins(14, 12, 14, 12)
+            card_layout.setSpacing(8)
             heading_label = QLabel(heading)
-            heading_label.setStyleSheet("font:700 12pt 'Yu Gothic UI'; color:#7fd0ff;")
+            heading_label.setStyleSheet("font:700 12.5pt 'Yu Gothic UI'; color:#7fd0ff;")
             body_label = QLabel(text)
+            body_label.setTextFormat(Qt.RichText if "<" in text and ">" in text else Qt.PlainText)
             body_label.setWordWrap(True)
-            body_label.setStyleSheet("color:#e7f3ff; line-height:1.5;")
+            body_label.setStyleSheet("color:#e7f3ff; font:10.5pt 'Yu Gothic UI'; line-height:1.7;")
+            card.setStyleSheet("QFrame { background:#0d1726; border:1px solid #2b455f; border-radius:10px; }")
             card_layout.addWidget(heading_label)
             card_layout.addWidget(body_label)
             layout.addWidget(card)
@@ -3077,6 +3214,8 @@ class MainWindow(QMainWindow):
     def open_help_tab(self) -> None:
         if hasattr(self, "tabs"):
             self.tabs.setCurrentWidget(self.help_tab_widget)
+        if isinstance(self.help_page, QScrollArea):
+            self.help_page.verticalScrollBar().setValue(0)
 
     def wrap_widget(self, widget: QWidget) -> QWidget:
         shell = QWidget(); layout = QVBoxLayout(shell); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(widget); return shell
@@ -3136,6 +3275,7 @@ class MainWindow(QMainWindow):
     def handle_tab_changed(self, _index: int) -> None:
         is_inventory = self.tabs.currentIndex() == 2
         is_shipment = self.tabs.currentIndex() == 3
+        is_help = self.tabs.currentWidget() == self.help_tab_widget
         self.search_input.setVisible(is_inventory)
         self.copy_inventory_button.setVisible(is_inventory)
         self.export_inventory_button.setVisible(is_inventory)
@@ -3143,6 +3283,8 @@ class MainWindow(QMainWindow):
         self.delete_shipment_button.setVisible(is_shipment)
         if hasattr(self, "iso_rotate_button"):
             self.iso_rotate_button.setVisible(self.tabs.currentIndex() == 1)
+        if is_help and isinstance(self.help_page, QScrollArea):
+            self.help_page.verticalScrollBar().setValue(0)
         self.update_detail_overlay_geometry()
 
     def handle_stack_detail_tab_changed(self, _index: int) -> None:
@@ -3561,7 +3703,7 @@ class MainWindow(QMainWindow):
         return (len(used_cells) / available_cells) * 100.0
 
     def refresh_inventory_table(self) -> None:
-        rows: Dict[Tuple[str, str, str, str, str, str, str], dict] = {}
+        rows: Dict[Tuple[str, str, str, str, str, str], dict] = {}
         for pallet in self.filtered_pallets():
             for item in pallet.items:
                 if not self.item_matches_keyword(item):
@@ -3571,10 +3713,33 @@ class MainWindow(QMainWindow):
                         continue
                 thickness_text = str(item.thickness_mm)
                 key = (item.part_code, item.size, thickness_text, item.finish_text, item.grade, item.note)
-                row = rows.setdefault(key, {"part_code": item.part_code, "size": item.size, "thickness": thickness_text, "finish": item.finish_text, "grade": item.grade, "note": item.note, "sheets": 0, "height": 0, "pallets": set(), "locations": set(), "received_dates": set()})
-                row["sheets"] += item.sheet_count; row["height"] += item.height_mm; row["pallets"].add(pallet.pallet_number); row["locations"].add(location_stack_label(pallet)); row["received_dates"].add(pallet.received_date or "-")
+                row = rows.setdefault(
+                    key,
+                    {
+                        "part_code": item.part_code,
+                        "size": item.size,
+                        "thickness": thickness_text,
+                        "finish": item.finish_text,
+                        "grade": item.grade,
+                        "note": item.note,
+                        "sheets": 0,
+                        "height": 0,
+                        "placements": {},
+                    },
+                )
+                row["sheets"] += item.sheet_count
+                row["height"] += item.height_mm
+                row["placements"][pallet.pallet_number] = {
+                    "sort_key": (*location_to_grid(pallet.location_code), pallet.stack_order, pallet.pallet_number),
+                    "pallet_number": pallet.pallet_number,
+                    "location": location_stack_label(pallet),
+                    "received_date": pallet.received_date or "-",
+                }
         sort_key = self.inventory_sort_key
         reverse = self.inventory_sort_desc
+
+        def sorted_placements(row: dict) -> List[dict]:
+            return sorted(row["placements"].values(), key=lambda placement: placement["sort_key"])
 
         def sort_value(row: dict):
             if sort_key == "thickness":
@@ -3588,16 +3753,29 @@ class MainWindow(QMainWindow):
             if sort_key == "size":
                 return (row["size"], row["part_code"], parse_thickness_value(row["thickness"]), row["thickness"])
             if sort_key == "pallets":
-                return (", ".join(sorted(row["pallets"])), row["part_code"], row["size"])
+                return (", ".join(placement["pallet_number"] for placement in sorted_placements(row)), row["part_code"], row["size"])
             if sort_key == "locations":
-                return (", ".join(sorted(row["locations"])), row["part_code"], row["size"])
+                return (", ".join(placement["location"] for placement in sorted_placements(row)), row["part_code"], row["size"])
+            if sort_key == "received_dates":
+                return (", ".join(placement["received_date"] for placement in sorted_placements(row)), row["part_code"], row["size"])
             return (row["part_code"], row["size"], parse_thickness_value(row["thickness"]), row["thickness"])
 
         ordered = sorted(rows.values(), key=sort_value, reverse=reverse)
         self.inventory_table.setRowCount(len(ordered))
         for row_index, row in enumerate(ordered):
-            pallet_numbers = sorted(row["pallets"])
-            values = [row["part_code"], row["size"], str(row["thickness"]), row["finish"], row["grade"], str(row["sheets"]), ", ".join(sorted(row["locations"])), ", ".join(pallet_numbers)]
+            placements = sorted_placements(row)
+            pallet_numbers = [placement["pallet_number"] for placement in placements]
+            values = [
+                ", ".join(pallet_numbers),
+                row["part_code"],
+                row["size"],
+                str(row["thickness"]),
+                row["finish"],
+                row["grade"],
+                str(row["sheets"]),
+                ", ".join(placement["location"] for placement in placements),
+                ", ".join(placement["received_date"] for placement in placements),
+            ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if col == 0:
@@ -3802,14 +3980,15 @@ class MainWindow(QMainWindow):
 
     def handle_inventory_header_click(self, column: int) -> None:
         mapping = {
-            0: "part_code",
-            1: "size",
-            2: "thickness",
-            3: "finish",
-            4: "grade",
-            5: "sheets",
-            6: "locations",
-            7: "pallets",
+            0: "pallets",
+            1: "part_code",
+            2: "size",
+            3: "thickness",
+            4: "finish",
+            5: "grade",
+            6: "sheets",
+            7: "locations",
+            8: "received_dates",
         }
         target = mapping.get(column)
         if not target:
@@ -3973,16 +4152,20 @@ class MainWindow(QMainWindow):
     def nearby_stack_target(self, source: PalletRecord, map_x: float, map_y: float, location_code: str) -> Optional[PalletRecord]:
         if normalize_location_code(location_code) == ENTRY_LOCATION:
             return None
-        location_code = normalize_location_code(location_code)
         source_members = {member.pallet_number for member in self.store.group_members(source)}
         best = None
         best_distance = None
+        snap_distance_cells = 0.9
         for pallet in self.store.pallets:
             if pallet.pallet_number in source_members:
                 continue
-            if normalize_location_code(pallet.location_code) != location_code or pallet.map_x is None or pallet.map_y is None:
+            if self.store.is_entry_waiting_pallet(pallet) or pallet.map_x is None or pallet.map_y is None:
                 continue
-            distance = (pallet.map_x - map_x) ** 2 + (pallet.map_y - map_y) ** 2
+            dx_cells = (pallet.map_x - map_x) * GRID_COLUMNS
+            dy_cells = (pallet.map_y - map_y) * GRID_ROWS
+            distance = dx_cells * dx_cells + dy_cells * dy_cells
+            if distance > snap_distance_cells * snap_distance_cells:
+                continue
             if best_distance is None or distance < best_distance:
                 best = pallet
                 best_distance = distance
@@ -4078,8 +4261,10 @@ class MainWindow(QMainWindow):
         dx = map_x - old_x
         dy = map_y - old_y
         target_stack = self.nearby_stack_target(pallet, map_x, map_y, destination)
+        if target_stack is not None:
+            destination = normalize_location_code(target_stack.location_code)
 
-        if target_stack and normalize_location_code(target_stack.location_code) != normalize_location_code(pallet.location_code):
+        if target_stack:
             target_members = self.store.group_members(target_stack)
             next_order = len(target_members)
             for index, member in enumerate(members):
