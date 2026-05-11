@@ -2971,11 +2971,25 @@ class MainWindow(QMainWindow):
         self.detail_resize_active = False
         self.detail_resize_origin = QPoint()
         self.detail_resize_start_size: Optional[Tuple[int, int]] = None
+        self.cell_popup_timer = QTimer(self)
+        self.cell_popup_timer.setSingleShot(True)
+        self.cell_popup = QLabel(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.cell_popup.setWordWrap(True)
+        self.cell_popup.setMaximumWidth(420)
+        self.cell_popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.cell_popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.cell_popup.setStyleSheet(
+            "QLabel { background:#fff7cc; color:#111111; border:1px solid #806000; "
+            "border-radius:6px; padding:8px; font:10.5pt 'Yu Gothic UI'; }"
+        )
+        self.cell_popup.hide()
+        self.cell_popup_timer.timeout.connect(self.cell_popup.hide)
         self.store_dirty = False
         self.setWindowTitle("Warehouse Management App - PySide6"); self.resize(1480, 920); self.setMinimumSize(900, 620)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.build_ui(); self.apply_theme(); self.refresh_all()
+        QApplication.instance().installEventFilter(self)
 
     def build_ui(self) -> None:
         central = QWidget(); self.setCentralWidget(central); root = QVBoxLayout(central); root.setContentsMargins(14, 14, 14, 14); root.setSpacing(10)
@@ -3060,25 +3074,27 @@ class MainWindow(QMainWindow):
         self.iso_rotate_button.clicked.connect(self.rotate_iso_view)
         self.iso_rotate_button.raise_()
         self.tabs.addTab(self.wrap_widget(self.iso_map), "45度ビュー")
-        self.inventory_table = QTableWidget(0, 9); self.inventory_table.setObjectName("inventoryTable"); self.inventory_table.setHorizontalHeaderLabels(["パレット番号", "品番", "サイズ", "厚み", "加工 / 裏表", "グレード", "総枚数", "保管場所", "入庫日"])
+        self.inventory_table = QTableWidget(0, 9); self.inventory_table.setObjectName("inventoryTable"); self.inventory_table.setHorizontalHeaderLabels(["品番", "サイズ", "厚み", "加工 / 裏表", "グレード", "総枚数", "保管場所", "パレット番号", "入庫日"])
         inventory_header = TouchFriendlyHeaderView(Qt.Horizontal, self.inventory_table)
         self.inventory_table.setHorizontalHeader(inventory_header)
         self.inventory_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.inventory_table.setShowGrid(True)
         self.inventory_table.setGridStyle(Qt.SolidLine)
         self.inventory_table.setAlternatingRowColors(True)
+        self.inventory_table.setMouseTracking(True)
+        self.inventory_table.viewport().installEventFilter(self)
         self.inventory_table.horizontalHeader().setSectionsMovable(False)
         self.inventory_table.horizontalHeader().setSectionsClickable(True)
         self.inventory_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.inventory_table.horizontalHeader().setMinimumSectionSize(72)
         self.inventory_table.horizontalHeader().setMinimumHeight(38)
-        self.inventory_table.setColumnWidth(0, 180)
-        self.inventory_table.setColumnWidth(1, 88)
-        self.inventory_table.setColumnWidth(2, 70)
-        self.inventory_table.setColumnWidth(3, 76)
-        self.inventory_table.setColumnWidth(4, 120)
+        self.inventory_table.setColumnWidth(0, 88)
+        self.inventory_table.setColumnWidth(1, 70)
+        self.inventory_table.setColumnWidth(2, 76)
+        self.inventory_table.setColumnWidth(3, 120)
+        self.inventory_table.setColumnWidth(4, 76)
         self.inventory_table.setColumnWidth(5, 76)
-        self.inventory_table.setColumnWidth(6, 76)
+        self.inventory_table.setColumnWidth(6, 180)
         self.inventory_table.setColumnWidth(7, 180)
         self.inventory_table.setColumnWidth(8, 150)
         self.inventory_hint = QLabel("列幅は項目名の境目をドラッグで調整できます。ダブルクリックで真上ビューの位置を確認できます。")
@@ -3093,6 +3109,14 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(inventory_shell, "在庫一覧")
         self.inventory_table.horizontalHeader().sectionClicked.connect(self.handle_inventory_header_click)
         self.inventory_table.cellDoubleClicked.connect(self.select_pallet_from_inventory_table)
+        self.inventory_table.cellClicked.connect(lambda row, col: self.show_table_cell_tooltip(self.inventory_table, row, col))
+        self.inventory_table.cellPressed.connect(lambda row, col: QTimer.singleShot(0, lambda: self.show_table_cell_popup_if_elided(self.inventory_table, row, col)))
+        self.inventory_table.itemPressed.connect(lambda item: QTimer.singleShot(0, lambda: self.show_table_item_popup(self.inventory_table, item)))
+        self.inventory_table.currentCellChanged.connect(lambda _row, _col, _prev_row, _prev_col: self.hide_table_popup())
+        self.inventory_table.itemSelectionChanged.connect(self.hide_table_popup)
+        self.inventory_table.currentItemChanged.connect(lambda current, _previous: QTimer.singleShot(0, lambda: self.show_table_item_popup(self.inventory_table, current)))
+        self.inventory_table.itemEntered.connect(lambda item: self.show_table_item_tooltip(self.inventory_table, item))
+        self.inventory_table.currentItemChanged.connect(lambda current, _previous: self.show_table_item_tooltip(self.inventory_table, current))
         self.shipment_table = QTableWidget(0, 10); self.shipment_table.setObjectName("shipmentTable"); self.shipment_table.setHorizontalHeaderLabels(["出庫日", "パレット番号", "品名", "品数", "総枚数", "総高さ", "最終位置", "入庫日", "色", "備考"])
         shipment_header = TouchFriendlyHeaderView(Qt.Horizontal, self.shipment_table)
         self.shipment_table.setHorizontalHeader(shipment_header)
@@ -3100,6 +3124,8 @@ class MainWindow(QMainWindow):
         self.shipment_table.setShowGrid(True)
         self.shipment_table.setGridStyle(Qt.SolidLine)
         self.shipment_table.setAlternatingRowColors(True)
+        self.shipment_table.setMouseTracking(True)
+        self.shipment_table.viewport().installEventFilter(self)
         self.shipment_table.horizontalHeader().setSectionsMovable(False)
         self.shipment_table.horizontalHeader().setSectionsClickable(True)
         self.shipment_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -3116,6 +3142,14 @@ class MainWindow(QMainWindow):
         self.shipment_table.setColumnWidth(7, 110)
         self.shipment_table.setColumnWidth(8, 80)
         self.shipment_table.setColumnWidth(9, 180)
+        self.shipment_table.cellClicked.connect(lambda row, col: self.show_table_cell_tooltip(self.shipment_table, row, col))
+        self.shipment_table.cellPressed.connect(lambda row, col: QTimer.singleShot(0, lambda: self.show_table_cell_popup_if_elided(self.shipment_table, row, col)))
+        self.shipment_table.itemPressed.connect(lambda item: QTimer.singleShot(0, lambda: self.show_table_item_popup(self.shipment_table, item)))
+        self.shipment_table.currentCellChanged.connect(lambda _row, _col, _prev_row, _prev_col: self.hide_table_popup())
+        self.shipment_table.itemSelectionChanged.connect(self.hide_table_popup)
+        self.shipment_table.currentItemChanged.connect(lambda current, _previous: QTimer.singleShot(0, lambda: self.show_table_item_popup(self.shipment_table, current)))
+        self.shipment_table.itemEntered.connect(lambda item: self.show_table_item_tooltip(self.shipment_table, item))
+        self.shipment_table.currentItemChanged.connect(lambda current, _previous: self.show_table_item_tooltip(self.shipment_table, current))
         self.tabs.addTab(self.wrap_widget(self.shipment_table), "出庫一覧")
         self.help_page = self.build_help_page(); self.help_tab_widget = self.wrap_widget(self.help_page); self.tabs.addTab(self.help_tab_widget, "ヘルプ")
         self.update_tab_visuals()
@@ -3305,6 +3339,8 @@ class MainWindow(QMainWindow):
         detail_resize_handle = getattr(self, "detail_resize_handle", None)
         stack_detail_pages = getattr(self, "stack_detail_pages", None)
         stack_detail_selector = getattr(self, "stack_detail_selector", None)
+        inventory_table = getattr(self, "inventory_table", None)
+        shipment_table = getattr(self, "shipment_table", None)
         map_container = getattr(self, "map_container", None)
         tabs = getattr(self, "tabs", None)
         current_page = stack_detail_pages.currentWidget() if stack_detail_pages is not None else None
@@ -3314,6 +3350,26 @@ class MainWindow(QMainWindow):
         if current_scroll is not None:
             draggable_sources.add(current_scroll)
             draggable_sources.add(current_scroll.viewport())
+        popup_tables = {}
+        if inventory_table is not None:
+            popup_tables[inventory_table.viewport()] = inventory_table
+        if shipment_table is not None:
+            popup_tables[shipment_table.viewport()] = shipment_table
+        popup_table = popup_tables.get(source)
+        if event.type() in (QEvent.MouseButtonPress, QEvent.TouchBegin):
+            allowed_sources = set(popup_tables.keys())
+            allowed_sources.update({inventory_table, shipment_table, self.cell_popup})
+            if source not in allowed_sources:
+                self.hide_table_popup()
+        if popup_table is not None:
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                point = event.position().toPoint()
+                self.schedule_table_popup_from_point(popup_table, point)
+            elif event.type() == QEvent.TouchEnd:
+                points = event.points()
+                if points:
+                    point = points[0].position().toPoint()
+                    self.schedule_table_popup_from_point(popup_table, point)
         if event.type() == QEvent.MouseButtonPress and source == detail_resize_handle and event.button() == Qt.LeftButton:
             self.detail_resize_active = True
             self.detail_resize_origin = event.globalPosition().toPoint()
@@ -3766,7 +3822,6 @@ class MainWindow(QMainWindow):
             placements = sorted_placements(row)
             pallet_numbers = [placement["pallet_number"] for placement in placements]
             values = [
-                ", ".join(pallet_numbers),
                 row["part_code"],
                 row["size"],
                 str(row["thickness"]),
@@ -3774,11 +3829,13 @@ class MainWindow(QMainWindow):
                 row["grade"],
                 str(row["sheets"]),
                 ", ".join(placement["location"] for placement in placements),
+                ", ".join(pallet_numbers),
                 ", ".join(placement["received_date"] for placement in placements),
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if col == 0:
+                item.setToolTip(value)
+                if col == 7:
                     item.setData(Qt.UserRole, pallet_numbers)
                 self.inventory_table.setItem(row_index, col, item)
 
@@ -3800,9 +3857,121 @@ class MainWindow(QMainWindow):
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
+                item.setToolTip(value)
                 if col == 0:
                     item.setData(Qt.UserRole, shipment.shipment_id)
                 self.shipment_table.setItem(row_index, col, item)
+
+    def show_table_item_tooltip(self, table: QTableWidget, item: Optional[QTableWidgetItem]) -> None:
+        if table is None or item is None:
+            return
+        text = (item.text() or "").strip()
+        if not text:
+            return
+        if not self.is_cell_text_elided(table, item):
+            return
+        rect = table.visualItemRect(item)
+        if not rect.isValid():
+            return
+        global_pos = table.viewport().mapToGlobal(rect.bottomRight() + QPoint(6, 6))
+        QToolTip.showText(global_pos, text, table)
+
+    def show_table_cell_tooltip(self, table: QTableWidget, row: int, column: int) -> None:
+        if table is None:
+            return
+        item = table.item(row, column)
+        if item is None:
+            return
+        self.show_table_item_tooltip(table, item)
+
+    def hide_table_popup(self) -> None:
+        self.cell_popup_timer.stop()
+        self.cell_popup.hide()
+        QToolTip.hideText()
+
+    def is_cell_text_elided(self, table: QTableWidget, item: Optional[QTableWidgetItem]) -> bool:
+        if table is None or item is None:
+            return False
+        text = item.text() or ""
+        if not text:
+            return False
+        rect = table.visualItemRect(item)
+        if not rect.isValid() or rect.width() <= 0:
+            return False
+        metrics = table.fontMetrics()
+        available_width = max(0, rect.width() - 24)
+        elided = metrics.elidedText(text, Qt.ElideRight, available_width)
+        if elided != text:
+            return True
+        text_width = metrics.horizontalAdvance(text)
+        return text_width >= max(0, available_width - 2)
+
+    def format_table_popup_text(self, text: str) -> str:
+        display_text = (text or "").strip()
+        if len(display_text) > 80:
+            display_text = display_text.replace(", ", ",\n")
+        return display_text
+
+    def show_table_item_popup(self, table: QTableWidget, item: Optional[QTableWidgetItem]) -> None:
+        self.hide_table_popup()
+        if table is None or item is None:
+            return
+        text = (item.text() or "").strip()
+        if not text:
+            return
+        if not self.is_cell_text_elided(table, item):
+            return
+        rect = table.visualItemRect(item)
+        if not rect.isValid():
+            return
+        display_text = self.format_table_popup_text(text)
+        global_pos = table.viewport().mapToGlobal(rect.bottomLeft() + QPoint(0, 6))
+        self.cell_popup.setText(display_text)
+        self.cell_popup.adjustSize()
+        screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            popup_width = self.cell_popup.width()
+            popup_height = self.cell_popup.height()
+            x = min(max(global_pos.x(), available.left() + 6), max(available.left() + 6, available.right() - popup_width - 6))
+            y = global_pos.y()
+            if y + popup_height > available.bottom() - 6:
+                y = max(available.top() + 6, table.viewport().mapToGlobal(rect.topLeft()).y() - popup_height - 6)
+            global_pos = QPoint(x, y)
+        self.cell_popup.move(global_pos)
+        self.cell_popup.show()
+        self.cell_popup.raise_()
+        self.cell_popup_timer.start(8000)
+
+    def show_table_cell_popup(self, table: QTableWidget, row: int, column: int) -> None:
+        if table is None or row < 0 or column < 0:
+            self.hide_table_popup()
+            return
+        item = table.item(row, column)
+        if item is None:
+            self.hide_table_popup()
+            return
+        self.show_table_item_popup(table, item)
+
+    def show_table_cell_popup_if_elided(self, table: QTableWidget, row: int, column: int) -> None:
+        if table is None or row < 0 or column < 0:
+            self.hide_table_popup()
+            return
+        item = table.item(row, column)
+        if item is None or not self.is_cell_text_elided(table, item):
+            self.hide_table_popup()
+            return
+        self.show_table_item_popup(table, item)
+
+    def schedule_table_popup_from_point(self, table: QTableWidget, point: QPoint) -> None:
+        if table is None:
+            return
+        index = table.indexAt(point)
+        if not index.isValid():
+            return
+        row = index.row()
+        column = index.column()
+        QTimer.singleShot(0, lambda table=table, row=row, column=column: self.show_table_cell_popup(table, row, column))
 
     def copy_inventory_table(self) -> None:
         if self.inventory_table.rowCount() == 0:
@@ -3853,18 +4022,13 @@ class MainWindow(QMainWindow):
             rows.values(),
             key=lambda row: (row["part_code"], row["size"], parse_thickness_value(row["thickness"]), row["finish"], row["grade"]),
         )
-        lines = ["\t".join(["品名", "品番", "サイズ", "厚み", "加工 / 裏表", "グレード", "合計枚数"])]
+        lines = ["\t".join(["品名", "合計枚数"])]
         for row in ordered:
             lines.append(
                 "\t".join(
                     [
                         row["identifier"],
-                        row["part_code"],
-                        row["size"],
-                        row["thickness"],
-                        row["finish"],
-                        row["grade"],
-                        str(row["sheets"]),
+                        f"{row['grade']} {row['sheets']}",
                     ]
                 )
             )
@@ -3980,14 +4144,14 @@ class MainWindow(QMainWindow):
 
     def handle_inventory_header_click(self, column: int) -> None:
         mapping = {
-            0: "pallets",
-            1: "part_code",
-            2: "size",
-            3: "thickness",
-            4: "finish",
-            5: "grade",
-            6: "sheets",
-            7: "locations",
+            0: "part_code",
+            1: "size",
+            2: "thickness",
+            3: "finish",
+            4: "grade",
+            5: "sheets",
+            6: "locations",
+            7: "pallets",
             8: "received_dates",
         }
         target = mapping.get(column)
@@ -4001,7 +4165,7 @@ class MainWindow(QMainWindow):
         self.refresh_inventory_table()
 
     def select_pallet_from_inventory_table(self, row: int, _column: int) -> None:
-        item = self.inventory_table.item(row, 0)
+        item = self.inventory_table.item(row, 7)
         pallet_numbers = item.data(Qt.UserRole) if item is not None else None
         if not isinstance(pallet_numbers, list) or not pallet_numbers:
             return
