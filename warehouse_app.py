@@ -2179,6 +2179,10 @@ class TopMapWidget(QWidget):
         for i in range(rows + 1):
             y = bounds.top() + i * bounds.height() / rows; painter.drawLine(bounds.left(), int(y), bounds.right(), int(y))
         painter.setPen(QPen(QColor("#1a4f80"), 1)); painter.drawRect(bounds)
+        self.draw_grid_labels(painter, bounds, columns, rows)
+        return columns, rows
+
+    def draw_grid_labels(self, painter: QPainter, bounds: QRect, columns: int, rows: int) -> None:
         painter.setPen(QColor("#3b6f9e"))
         painter.setFont(QFont("Consolas", 7))
         for i in range(columns):
@@ -2186,8 +2190,9 @@ class TopMapWidget(QWidget):
             painter.drawText(QRect(int(x) - 14, bounds.top() - 16, 28, 12), Qt.AlignCenter, column_label(i))
         for i in range(rows):
             y = bounds.top() + (i + 0.5) * bounds.height() / rows
-            painter.drawText(QRect(bounds.right() + 4, int(y) - 6, 28, 12), Qt.AlignVCenter | Qt.AlignLeft, str(i + 1))
-        return columns, rows
+            label_rect = QRect(bounds.right() + 4, int(y) - 7, 32, 14)
+            painter.fillRect(label_rect.adjusted(-1, 0, 0, 0), QColor(7, 17, 31, 215))
+            painter.drawText(label_rect, Qt.AlignVCenter | Qt.AlignLeft, str(i + 1))
 
     def draw_entry_waiting_area(self, painter: QPainter, bounds: QRect) -> None:
         if not self.has_entry_waiting_pallets():
@@ -2421,6 +2426,7 @@ class TopMapWidget(QWidget):
             painter.setFont(QFont("Consolas", 16, QFont.Bold))
             painter.setPen(QColor("#fff4b1") if self.drag_preview_location in self.store.blocked_locations else QColor("#dff6ff"))
             painter.drawText(preview_rect, Qt.AlignCenter, self.drag_preview_location)
+        self.draw_grid_labels(painter, bounds, columns, rows)
 
     def mousePressEvent(self, event) -> None:
         point = event.position().toPoint()
@@ -3210,7 +3216,7 @@ class MainWindow(QMainWindow):
             ("基本操作", "1. 新規登録でパレット番号・入庫日・明細を入力\n2. 明細を追加してから OK で登録\n3. 登録直後は仮置きエリア（未配置）に入るため、真上ビューで保管場所へドラッグ移動"),
             ("仮置きエリア（未配置）", "新規登録・出庫復元・列解除・積み替えで作成した空パレットは仮置きエリアへ入ります。\n上限は10個です。上限に達した場合は、先に仮置きエリア内のパレットを倉庫内へ配置してください。\n仮置き中のパレットは、パレット数・明細数・総枚数・面積使用率にカウントしません。"),
             ("位置変更", "真上ビューでパレットをドラッグ、またはタブレットでスワイプして移動します。\n2本指ピンチで拡大縮小できます。\nある程度グリッドに吸着しますが、細かい位置調整もできます。\nパレットのない場所をクリックすると選択解除できます。\nパレットを右クリックすると、編集・向き変更・段操作・列解除・積み替え・出庫のメニューを表示できます。"),
-            ("積み重ね", "1ロケーション = 1スタック列です。同じロケーションに置いたパレットは同じ列として扱います。\n段を上げる / 下げるで同じ列の上下順を入れ替えます。\n列を解除は、選択中のパレットを1枚だけ外して仮置きエリア（未配置）へ移動します。"),
+            ("積み重ね", "1ロケーション = 1スタック列です。同じマスに置いたパレットだけが同じ列として扱われます。\n隣マスや上下左右の別マスに置いた場合は積み重なりません。\n段を上げる / 下げるで同じ列の上下順を入れ替えます。\n列を解除は、選択中のパレットを1枚だけ外して仮置きエリア（未配置）へ移動します。"),
             ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n面積使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、面積使用率では1パレット列分としてカウントします。"),
             ("置けないマス設定", "置けないマス設定を押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
             ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\nパレット番号・入庫日・色・向き・明細の追加/削除/順番変更ができます。\n厚みと枚数は行内の +/- で調整できます。厚みが 3-3.5 のような範囲入力でも、+/- を使うと最大値基準の単一値へ切り替えて調整します。"),
@@ -4000,7 +4006,7 @@ class MainWindow(QMainWindow):
                     if pallet_tokens and not all(any(token in hay for hay in pallet_haystacks) for token in pallet_tokens):
                         continue
                 key = (item.part_code, item.size, str(item.thickness_mm), item.finish_text, item.grade)
-                identifier = f"#{item.part_code}-{item.size}{item.thickness_mm} {item.finish_text} {item.grade}"
+                identifier = f"#{item.part_code}-{item.size}{item.thickness_mm} {item.finish_text}"
                 row = rows.setdefault(
                     key,
                     {
@@ -4316,24 +4322,13 @@ class MainWindow(QMainWindow):
     def nearby_stack_target(self, source: PalletRecord, map_x: float, map_y: float, location_code: str) -> Optional[PalletRecord]:
         if normalize_location_code(location_code) == ENTRY_LOCATION:
             return None
+        location_code = normalize_location_code(location_code)
         source_members = {member.pallet_number for member in self.store.group_members(source)}
-        best = None
-        best_distance = None
-        snap_distance_cells = 0.9
-        for pallet in self.store.pallets:
+        for pallet in self.store.pallets_at_location(location_code):
             if pallet.pallet_number in source_members:
                 continue
-            if self.store.is_entry_waiting_pallet(pallet) or pallet.map_x is None or pallet.map_y is None:
-                continue
-            dx_cells = (pallet.map_x - map_x) * GRID_COLUMNS
-            dy_cells = (pallet.map_y - map_y) * GRID_ROWS
-            distance = dx_cells * dx_cells + dy_cells * dy_cells
-            if distance > snap_distance_cells * snap_distance_cells:
-                continue
-            if best_distance is None or distance < best_distance:
-                best = pallet
-                best_distance = distance
-        return best
+            return pallet
+        return None
 
     def normalized_footprint(self, pallet: PalletRecord) -> Tuple[float, float]:
         width_mm, depth_mm = footprint_mm(pallet)
@@ -4420,28 +4415,25 @@ class MainWindow(QMainWindow):
         destination = normalize_location_code(destination)
         if destination not in self.store.locations: self.store.locations.append(destination)
         members = self.store.group_members(pallet)
-        old_x = pallet.map_x if pallet.map_x is not None else map_x
-        old_y = pallet.map_y if pallet.map_y is not None else map_y
-        dx = map_x - old_x
-        dy = map_y - old_y
         target_stack = self.nearby_stack_target(pallet, map_x, map_y, destination)
         if target_stack is not None:
             destination = normalize_location_code(target_stack.location_code)
+        destination_x, destination_y = self.top_map.normalized_position_for_location(destination, pallet)
 
         if target_stack:
             target_members = self.store.group_members(target_stack)
             next_order = len(target_members)
             for index, member in enumerate(members):
                 member.location_code = destination
-                member.map_x = target_stack.map_x if target_stack.map_x is not None else map_x
-                member.map_y = target_stack.map_y if target_stack.map_y is not None else map_y
+                member.map_x = target_stack.map_x if target_stack.map_x is not None else destination_x
+                member.map_y = target_stack.map_y if target_stack.map_y is not None else destination_y
                 member.stack_order = next_order + index
                 member.updated_at = now_text()
         else:
-            for member in members:
+            for index, member in enumerate(members):
                 member.location_code = destination
-                member.map_x = (member.map_x if member.map_x is not None else old_x) + dx
-                member.map_y = (member.map_y if member.map_y is not None else old_y) + dy
+                member.map_x, member.map_y = self.top_map.normalized_position_for_location(destination, member)
+                member.stack_order = index
                 member.updated_at = now_text()
         pallet.updated_at = now_text()
         self.store.normalize_stacks()

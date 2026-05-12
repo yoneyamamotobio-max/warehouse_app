@@ -407,7 +407,7 @@
   "pallets": [
     {
       "pallet_number": "38651",
-      "location_code": "G13",
+      "location_code": "I13",
       "received_date": "",
       "color_key": "BLUE",
       "color_mode": "AUTO",
@@ -432,7 +432,7 @@
     },
     {
       "pallet_number": "R080326",
-      "location_code": "G15",
+      "location_code": "H15",
       "received_date": "",
       "color_key": "ORANGE",
       "color_mode": "MANUAL",
@@ -477,7 +477,7 @@
     },
     {
       "pallet_number": "R060507",
-      "location_code": "F11",
+      "location_code": "G11",
       "received_date": "2026-04-02",
       "color_key": "TEAL",
       "color_mode": "MANUAL",
@@ -502,7 +502,7 @@
     },
     {
       "pallet_number": "--------",
-      "location_code": "E6",
+      "location_code": "F6",
       "received_date": "2026-04-03",
       "color_key": "GREEN",
       "color_mode": "MANUAL",
@@ -527,7 +527,7 @@
     },
     {
       "pallet_number": "1111111",
-      "location_code": "G10",
+      "location_code": "I10",
       "received_date": "2026-04-07",
       "color_key": "PURPLE",
       "color_mode": "MANUAL",
@@ -552,7 +552,7 @@
     },
     {
       "pallet_number": "000000",
-      "location_code": "E11",
+      "location_code": "F11",
       "received_date": "2026-04-07",
       "color_key": "RED",
       "color_mode": "MANUAL",
@@ -577,7 +577,7 @@
     },
     {
       "pallet_number": "R040303",
-      "location_code": "G10",
+      "location_code": "I10",
       "received_date": "",
       "color_key": "GRAY",
       "color_mode": "AUTO",
@@ -642,7 +642,7 @@
     },
     {
       "pallet_number": "R",
-      "location_code": "I4",
+      "location_code": "K4",
       "received_date": "2026-04-13",
       "color_key": "BLUE",
       "color_mode": "AUTO",
@@ -667,7 +667,7 @@
     },
     {
       "pallet_number": "AAAA",
-      "location_code": "N13",
+      "location_code": "Q13",
       "received_date": "",
       "color_key": "GREEN",
       "color_mode": "AUTO",
@@ -692,7 +692,7 @@
     },
     {
       "pallet_number": "4444",
-      "location_code": "G13",
+      "location_code": "I13",
       "received_date": "2026-04-15",
       "color_key": "BLUE",
       "color_mode": "AUTO",
@@ -717,7 +717,7 @@
     },
     {
       "pallet_number": "846541",
-      "location_code": "F17",
+      "location_code": "G17",
       "received_date": "2026-04-15",
       "color_key": "GRAY",
       "color_mode": "AUTO",
@@ -752,7 +752,7 @@
     },
     {
       "pallet_number": "SD",
-      "location_code": "H17",
+      "location_code": "J17",
       "received_date": "2026-04-15",
       "color_key": "RED",
       "color_mode": "AUTO",
@@ -777,7 +777,7 @@
     },
     {
       "pallet_number": "4534",
-      "location_code": "I14",
+      "location_code": "K14",
       "received_date": "2026-04-15",
       "color_key": "RED",
       "color_mode": "AUTO",
@@ -802,7 +802,7 @@
     },
     {
       "pallet_number": "444",
-      "location_code": "I4",
+      "location_code": "K4",
       "received_date": "2026-04-15",
       "color_key": "RED",
       "color_mode": "AUTO",
@@ -827,7 +827,7 @@
     },
     {
       "pallet_number": "54",
-      "location_code": "G19",
+      "location_code": "J20",
       "received_date": "2026-04-15",
       "color_key": "GRAY",
       "color_mode": "AUTO",
@@ -862,7 +862,7 @@
     },
     {
       "pallet_number": "5564",
-      "location_code": "J12",
+      "location_code": "L12",
       "received_date": "2026-04-15",
       "color_key": "BLUE",
       "color_mode": "AUTO",
@@ -887,7 +887,7 @@
     },
     {
       "pallet_number": "000",
-      "location_code": "J17",
+      "location_code": "L17",
       "received_date": "2026-04-23",
       "color_key": "BLUE",
       "color_mode": "AUTO",
@@ -912,16 +912,16 @@
     },
     {
       "pallet_number": "4141",
-      "location_code": "L7",
+      "location_code": "L8",
       "received_date": "2026-04-23",
       "color_key": "RED",
       "color_mode": "AUTO",
       "last_manual_color_key": "GRAY",
-      "stack_order": 1,
+      "stack_order": 0,
       "orientation": 0,
-      "map_x": 0.725,
-      "map_y": 0.325,
-      "updated_at": "2026-05-12 15:37:49",
+      "map_x": 0.575,
+      "map_y": 0.375,
+      "updated_at": "2026-04-24 16:33:39",
       "items": [
         {
           "line_id": "5c5109ca435b4ed8bb904d013ac21442",
@@ -937,7 +937,7 @@
     },
     {
       "pallet_number": "4456",
-      "location_code": "L7",
+      "location_code": "O7",
       "received_date": "2026-04-24",
       "color_key": "GRAY",
       "color_mode": "MANUAL",
