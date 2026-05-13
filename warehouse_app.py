@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, Signal, QTimer
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QAbstractSpinBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget, QToolTip, QVBoxLayout, QWidget
 
@@ -262,8 +262,9 @@ class InventoryStore:
     def sync_pallet_locations_to_visible_grid(self) -> None:
         for pallet in self.pallets:
             visible_code = current_visible_location_for_pallet(pallet)
-            if visible_code and normalize_location_code(pallet.location_code) != visible_code:
-                pallet.location_code = visible_code
+            normalized_visible = normalize_location_code(visible_code) if visible_code else ""
+            if normalized_visible and normalize_location_code(pallet.location_code) != normalized_visible:
+                pallet.location_code = normalized_visible
 
     def normalize_stacks(self) -> None:
         self.sync_pallet_locations_to_visible_grid()
@@ -631,9 +632,29 @@ def location_to_grid(location: str) -> Tuple[int, int]:
     return min(GRID_COLUMNS - 1, col), min(GRID_ROWS - 1, row)
 
 
+def normalized_map_to_grid(map_x: float, map_y: float) -> Tuple[int, int]:
+    clamped_x = max(0.0, min(0.999999, float(map_x)))
+    clamped_y = max(0.0, min(0.999999, float(map_y)))
+    col = min(GRID_COLUMNS - 1, max(0, int(clamped_x * GRID_COLUMNS)))
+    row = min(GRID_ROWS - 1, max(0, int(clamped_y * GRID_ROWS)))
+    return col, row
+
+
+def format_location_code(col: int, row: int) -> str:
+    safe_col = min(GRID_COLUMNS - 1, max(0, int(col)))
+    safe_row = min(GRID_ROWS - 1, max(0, int(row)))
+    return f"{column_label(safe_col)}{safe_row + 1:02d}"
+
+
+def grid_center_to_map(col: int, row: int) -> Tuple[float, float]:
+    safe_col = min(GRID_COLUMNS - 1, max(0, int(col)))
+    safe_row = min(GRID_ROWS - 1, max(0, int(row)))
+    return (safe_col + 0.5) / GRID_COLUMNS, (safe_row + 0.5) / GRID_ROWS
+
+
 def visible_location_code(location: str) -> str:
     col, row = location_to_grid(location)
-    return f"{column_label(col)}{row + 1}"
+    return format_location_code(col, row)
 
 
 def location_stack_label(pallet: PalletRecord) -> str:
@@ -643,11 +664,13 @@ def location_stack_label(pallet: PalletRecord) -> str:
 def current_visible_location_for_pallet(pallet: PalletRecord) -> Optional[str]:
     if normalize_location_code(pallet.location_code) == ENTRY_LOCATION and pallet.map_y is not None and pallet.map_y > 1.0:
         return None
+    location_code = normalize_location_code(pallet.location_code)
+    if location_code and location_code != ENTRY_LOCATION:
+        return visible_location_code(location_code)
     if pallet.map_x is not None and pallet.map_y is not None and pallet.map_y <= 1.0:
-        col = min(GRID_COLUMNS - 1, max(0, int(round(pallet.map_x * GRID_COLUMNS - 0.5))))
-        row = min(GRID_ROWS - 1, max(0, int(round(pallet.map_y * GRID_ROWS - 0.5))))
-        return f"{column_label(col)}{row + 1}"
-    return visible_location_code(pallet.location_code)
+        col, row = normalized_map_to_grid(pallet.map_x, pallet.map_y)
+        return format_location_code(col, row)
+    return visible_location_code(location_code or "A1")
 
 
 def column_code_from_location(location: str) -> str:
@@ -788,7 +811,7 @@ def pallet_popup_text(store: "InventoryStore", pallet: PalletRecord) -> str:
     lines.extend([
         "",
         "補足:",
-        f"位置: {pallet.location_code} / 積み段: {stack_position_label(store, pallet)}",
+        f"位置: {visible_location_code(pallet.location_code)} / 積み段: {stack_position_label(store, pallet)}",
         f"概算高: {pallet.estimated_height_mm}mm",
         f"入庫日: {pallet.received_date or '-'}",
         f"向き: {orientation_label(pallet.orientation)}",
@@ -1331,6 +1354,46 @@ class CountLineEdit(AutoNormalizeLineEdit):
         self.set_numeric_value(next_value)
 
 
+class RepeatStepController(QObject):
+    def __init__(self, button: QPushButton, callback, enabled_check=lambda: True, delay: int = 350, interval: int = 80) -> None:
+        super().__init__(button)
+        self.button = button
+        self.callback = callback
+        self.enabled_check = enabled_check
+        self.delay_timer = QTimer(button)
+        self.delay_timer.setSingleShot(True)
+        self.delay_timer.setInterval(delay)
+        self.repeat_timer = QTimer(button)
+        self.repeat_timer.setInterval(interval)
+        self.delay_timer.timeout.connect(self.repeat_timer.start)
+        self.repeat_timer.timeout.connect(self.fire)
+        button.pressed.connect(self.start)
+        button.released.connect(self.stop)
+        button.installEventFilter(self)
+
+    def fire(self) -> None:
+        if not self.button.isEnabled() or not self.enabled_check():
+            self.stop()
+            return
+        self.callback()
+
+    def start(self) -> None:
+        self.stop()
+        if not self.button.isEnabled() or not self.enabled_check():
+            return
+        self.callback()
+        self.delay_timer.start()
+
+    def stop(self) -> None:
+        self.delay_timer.stop()
+        self.repeat_timer.stop()
+
+    def eventFilter(self, source, event) -> bool:
+        if source is self.button and event.type() in (QEvent.Hide, QEvent.Leave, QEvent.FocusOut, QEvent.WindowDeactivate, QEvent.MouseButtonRelease, QEvent.TouchEnd):
+            self.stop()
+        return super().eventFilter(source, event)
+
+
 class RegistrationDialog(QDialog):
     def __init__(self, locations: List[str], parent: Optional[QWidget] = None, initial_payload: Optional[Tuple[str, str, int, str, str, List[InventoryItemLine]]] = None) -> None:
         super().__init__(parent)
@@ -1379,6 +1442,7 @@ class RegistrationDialog(QDialog):
 
         box = QFrame(); grid = QGridLayout(box)
         self.step_button_groups: List[Tuple[QPushButton, QPushButton, object]] = []
+        self.step_repeat_controllers: List[RepeatStepController] = []
         self.part_code = AutoNormalizeClearOnFocusLineEdit("39", uppercase=True, remove_spaces=True)
         self.size = QComboBox(); self.size.addItems(VALID_SIZES)
         self.size.setCurrentText("LL")
@@ -1450,15 +1514,15 @@ class RegistrationDialog(QDialog):
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
 
     def create_step_control(self, editor: QWidget, step_up, step_down, enabled_check) -> QWidget:
-        editor.setStyleSheet("QLineEdit { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:4px 6px; min-height:34px; }")
+        editor.setStyleSheet("QLineEdit { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:4px 6px; min-height:36px; }")
         wrapper = QWidget()
         layout = QHBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
+        layout.setSpacing(6)
         layout.addWidget(editor, 1)
         button_column = QVBoxLayout()
         button_column.setContentsMargins(0, 0, 0, 0)
-        button_column.setSpacing(2)
+        button_column.setSpacing(4)
         up_button = QPushButton("▲")
         down_button = QPushButton("▼")
         button_style = """
@@ -1467,8 +1531,8 @@ class RegistrationDialog(QDialog):
             color:#ffffff;
             border:1px solid #6ab8ff;
             border-radius:4px;
-            padding:0;
-            font:700 10pt 'Yu Gothic UI';
+            padding:2px 0;
+            font:700 11pt 'Yu Gothic UI';
         }
         QPushButton:hover { background:#3b95e6; }
         QPushButton:disabled {
@@ -1478,16 +1542,14 @@ class RegistrationDialog(QDialog):
         }
         """
         for button, tooltip in [(up_button, "1増やす"), (down_button, "1減らす")]:
-            button.setFixedSize(34, 18)
+            button.setMinimumSize(48, 28)
+            button.setFixedSize(48, 28)
             button.setFocusPolicy(Qt.NoFocus)
             button.setToolTip(tooltip)
             button.setStyleSheet(button_style)
-            button.setAutoRepeat(True)
-            button.setAutoRepeatDelay(350)
-            button.setAutoRepeatInterval(80)
             button_column.addWidget(button)
-        up_button.clicked.connect(step_up)
-        down_button.clicked.connect(step_down)
+        self.step_repeat_controllers.append(RepeatStepController(up_button, step_up, enabled_check))
+        self.step_repeat_controllers.append(RepeatStepController(down_button, step_down, enabled_check))
         layout.addLayout(button_column)
         self.step_button_groups.append((up_button, down_button, enabled_check))
         return wrapper
@@ -1714,6 +1776,7 @@ class EditPalletDialog(QDialog):
         self.setWindowTitle("パレット編集")
         self.resize(760, 620)
         self.original_pallet_number = pallet.pallet_number
+        self.step_repeat_controllers: List[RepeatStepController] = []
 
         root = QVBoxLayout(self)
         form = QFormLayout()
@@ -1728,7 +1791,7 @@ class EditPalletDialog(QDialog):
         self.pallet_number = AutoNormalizeLineEdit(source_pallet_number, uppercase=True, remove_spaces=True)
         self.received_date = AutoNormalizeLineEdit(source_received_date, remove_spaces=True)
         self.location_code = source_location_code
-        self.location = QLabel(f"{source_location_code} 位置変更はマップ上でドラッグ")
+        self.location = QLabel(f"{visible_location_code(source_location_code)} 位置変更はマップ上でドラッグ")
         self.orientation = QComboBox(); self.orientation.addItem("横向き", 0); self.orientation.addItem("縦向き", 90); self.orientation.setCurrentIndex(1 if source_orientation % 180 == 90 else 0)
         self.color_auto = QRadioButton("自動判別")
         self.color_manual = QRadioButton("手動指定")
@@ -1844,8 +1907,49 @@ class EditPalletDialog(QDialog):
                 button_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
                 button_item.setBackground(QColor("#12304d"))
                 button_item.setForeground(QColor("#dff6ff"))
+            self.ensure_step_button_widget(row, self.THICKNESS_DOWN_COL, "-", "厚みを1減らす", lambda r=row: self.adjust_row_thickness(r, -1), lambda r=row: is_valid_thickness(self.cell_text(r, self.THICKNESS_COL)))
+            self.ensure_step_button_widget(row, self.THICKNESS_UP_COL, "+", "厚みを1増やす", lambda r=row: self.adjust_row_thickness(r, 1), lambda r=row: is_valid_thickness(self.cell_text(r, self.THICKNESS_COL)))
+            self.ensure_step_button_widget(row, self.SHEET_DOWN_COL, "-", "枚数を1減らす", lambda r=row: self.adjust_row_quantity(r, -1), lambda: True)
+            self.ensure_step_button_widget(row, self.SHEET_UP_COL, "+", "枚数を1増やす", lambda r=row: self.adjust_row_quantity(r, 1), lambda: True)
             self.refresh_thickness_step_buttons(row)
         self.item_table.update_drag_feedback()
+
+    def ensure_step_button_widget(self, row: int, col: int, text: str, tooltip: str, callback, enabled_check) -> None:
+        existing = self.item_table.cellWidget(row, col)
+        if existing is not None:
+            button = existing.findChild(QPushButton)
+            if button is not None:
+                button.setText(text)
+                button.setToolTip(tooltip)
+                button.setEnabled(enabled_check())
+                return
+        wrapper = QWidget()
+        layout = QHBoxLayout(wrapper)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+        button = QPushButton(text)
+        button.setFocusPolicy(Qt.NoFocus)
+        button.setMinimumSize(30, 24)
+        button.setStyleSheet("""
+        QPushButton {
+            background:#12304d;
+            color:#dff6ff;
+            border:1px solid #2b5b85;
+            border-radius:4px;
+            padding:1px 0;
+            font:700 10pt 'Yu Gothic UI';
+        }
+        QPushButton:disabled {
+            background:#263142;
+            color:#75879b;
+            border-color:#3f5368;
+        }
+        """)
+        button.setToolTip(tooltip)
+        button.setEnabled(enabled_check())
+        layout.addWidget(button)
+        self.item_table.setCellWidget(row, col, wrapper)
+        self.step_repeat_controllers.append(RepeatStepController(button, callback, enabled_check))
 
     def refresh_thickness_step_buttons(self, row: int) -> None:
         enabled = is_valid_thickness(self.cell_text(row, self.THICKNESS_COL))
@@ -1859,6 +1963,17 @@ class EditPalletDialog(QDialog):
             button_item.setFlags(flags)
             button_item.setBackground(QColor("#12304d" if enabled else "#263142"))
             button_item.setForeground(QColor("#dff6ff" if enabled else "#75879b"))
+            widget = self.item_table.cellWidget(row, col)
+            if widget is not None:
+                button = widget.findChild(QPushButton)
+                if button is not None:
+                    button.setEnabled(enabled)
+        for col in [self.SHEET_DOWN_COL, self.SHEET_UP_COL]:
+            widget = self.item_table.cellWidget(row, col)
+            if widget is not None:
+                button = widget.findChild(QPushButton)
+                if button is not None:
+                    button.setEnabled(True)
         self.item_table.update_drag_feedback()
 
     def handle_item_table_item_changed(self, item: QTableWidgetItem) -> None:
@@ -1879,6 +1994,9 @@ class EditPalletDialog(QDialog):
 
     def adjust_selected_row_thickness(self, delta: int) -> None:
         row = self.item_table.currentRow()
+        self.adjust_row_thickness(row, delta)
+
+    def adjust_row_thickness(self, row: int, delta: int) -> None:
         if row < 0 or row >= self.item_table.rowCount():
             return
         current = self.cell_text(row, self.THICKNESS_COL) or "10"
@@ -1886,31 +2004,32 @@ class EditPalletDialog(QDialog):
             return
         next_value = format_thickness_value(parse_thickness_value(current) + delta)
         self.set_cell_text(row, self.THICKNESS_COL, next_value)
+        self.item_table.setCurrentCell(row, self.THICKNESS_COL)
         self.update_color_controls()
 
     def adjust_selected_row_quantity(self, delta: int) -> None:
         row = self.item_table.currentRow()
+        self.adjust_row_quantity(row, delta)
+
+    def adjust_row_quantity(self, row: int, delta: int) -> None:
         if row < 0 or row >= self.item_table.rowCount():
             return
         current_text = normalize_numeric_text(self.cell_text(row, self.SHEET_COL))
         current = int(current_text) if current_text.isdigit() else 1
         next_value = max(1, min(600, current + delta))
         self.set_cell_text(row, self.SHEET_COL, str(next_value))
+        self.item_table.setCurrentCell(row, self.SHEET_COL)
         self.update_color_controls()
 
     def handle_table_cell_clicked(self, row: int, col: int) -> None:
         if col == self.THICKNESS_DOWN_COL:
-            self.item_table.setCurrentCell(row, self.THICKNESS_COL)
-            self.adjust_selected_row_thickness(-1)
+            self.adjust_row_thickness(row, -1)
         elif col == self.THICKNESS_UP_COL:
-            self.item_table.setCurrentCell(row, self.THICKNESS_COL)
-            self.adjust_selected_row_thickness(1)
+            self.adjust_row_thickness(row, 1)
         elif col == self.SHEET_DOWN_COL:
-            self.item_table.setCurrentCell(row, self.SHEET_COL)
-            self.adjust_selected_row_quantity(-1)
+            self.adjust_row_quantity(row, -1)
         elif col == self.SHEET_UP_COL:
-            self.item_table.setCurrentCell(row, self.SHEET_COL)
-            self.adjust_selected_row_quantity(1)
+            self.adjust_row_quantity(row, 1)
 
     def draft_items_for_color_preview(self) -> List[InventoryItemLine]:
         items: List[InventoryItemLine] = []
@@ -2027,6 +2146,7 @@ class EditPalletDialog(QDialog):
         super().keyPressEvent(event)
 
 
+
 class TransferDialog(QDialog):
     NEW_PALLET_VALUE = "__NEW_PALLET__"
 
@@ -2047,7 +2167,7 @@ class TransferDialog(QDialog):
         self.target_pallet = QComboBox()
         self.target_pallet.addItem("空パレットを作成", self.NEW_PALLET_VALUE)
         for pallet in target_pallets:
-            self.target_pallet.addItem(f"{pallet.pallet_number} ({pallet.location_code})", pallet.pallet_number)
+            self.target_pallet.addItem(f"{pallet.pallet_number} ({visible_location_code(pallet.location_code)})", pallet.pallet_number)
         self.new_pallet_number = AutoNormalizeLineEdit(uppercase=True, remove_spaces=True)
         self.new_pallet_number.setPlaceholderText("空パレット番号を入力")
         self.quantity = CountLineEdit("1")
@@ -2174,25 +2294,41 @@ class TopMapWidget(QWidget):
     def draw_grid(self, painter: QPainter, bounds: QRect) -> Tuple[int, int]:
         columns = GRID_COLUMNS; rows = GRID_ROWS
         painter.setPen(QPen(QColor("#102e4e"), 1, Qt.DotLine))
-        for i in range(columns + 1):
-            x = bounds.left() + i * bounds.width() / columns; painter.drawLine(int(x), bounds.top(), int(x), bounds.bottom())
-        for i in range(rows + 1):
-            y = bounds.top() + i * bounds.height() / rows; painter.drawLine(bounds.left(), int(y), bounds.right(), int(y))
+        x_edges = self.grid_edges(bounds.left(), bounds.width(), columns)
+        y_edges = self.grid_edges(bounds.top(), bounds.height(), rows)
+        for x in x_edges:
+            painter.drawLine(int(x), bounds.top(), int(x), bounds.bottom())
+        for y in y_edges:
+            painter.drawLine(bounds.left(), int(y), bounds.right(), int(y))
         painter.setPen(QPen(QColor("#1a4f80"), 1)); painter.drawRect(bounds)
         self.draw_grid_labels(painter, bounds, columns, rows)
         return columns, rows
 
+    def grid_edges(self, start: int, length: int, count: int) -> List[int]:
+        return [start + (i * length) // count for i in range(count + 1)]
+
+    def grid_cell_rect(self, bounds: QRect, col: int, row: int) -> QRect:
+        x_edges = self.grid_edges(bounds.left(), bounds.width(), GRID_COLUMNS)
+        y_edges = self.grid_edges(bounds.top(), bounds.height(), GRID_ROWS)
+        x0 = x_edges[col]
+        x1 = x_edges[col + 1]
+        y0 = y_edges[row]
+        y1 = y_edges[row + 1]
+        return QRect(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+
     def draw_grid_labels(self, painter: QPainter, bounds: QRect, columns: int, rows: int) -> None:
         painter.setPen(QColor("#3b6f9e"))
         painter.setFont(QFont("Consolas", 7))
+        x_edges = self.grid_edges(bounds.left(), bounds.width(), columns)
+        y_edges = self.grid_edges(bounds.top(), bounds.height(), rows)
         for i in range(columns):
-            x = bounds.left() + (i + 0.5) * bounds.width() / columns
+            x = (x_edges[i] + x_edges[i + 1]) / 2
             painter.drawText(QRect(int(x) - 14, bounds.top() - 16, 28, 12), Qt.AlignCenter, column_label(i))
         for i in range(rows):
-            y = bounds.top() + (i + 0.5) * bounds.height() / rows
+            y = (y_edges[i] + y_edges[i + 1]) / 2
             label_rect = QRect(bounds.right() + 4, int(y) - 7, 32, 14)
             painter.fillRect(label_rect.adjusted(-1, 0, 0, 0), QColor(7, 17, 31, 215))
-            painter.drawText(label_rect, Qt.AlignVCenter | Qt.AlignLeft, str(i + 1))
+            painter.drawText(label_rect, Qt.AlignVCenter | Qt.AlignLeft, f"{i + 1:02d}")
 
     def draw_entry_waiting_area(self, painter: QPainter, bounds: QRect) -> None:
         if not self.has_entry_waiting_pallets():
@@ -2221,20 +2357,13 @@ class TopMapWidget(QWidget):
     def compute_location_rects(self, bounds: QRect, columns: int, rows: int) -> Dict[str, QRect]:
         locations = sorted(self.store.locations)
         cell_map: Dict[str, QRect] = {}
-        cell_w = bounds.width() / columns
-        cell_h = bounds.height() / rows
         for location in locations:
             col, row = location_to_grid(location)
-            cell_map[location] = QRect(
-                int(bounds.left() + col * cell_w),
-                int(bounds.top() + row * cell_h),
-                max(24, int(cell_w)),
-                max(24, int(cell_h)),
-            )
+            cell_map[normalize_location_code(location)] = self.grid_cell_rect(bounds, col, row)
         return cell_map
 
     def default_point_for_location(self, location: str) -> QPoint:
-        rect = self.location_rects.get(location)
+        rect = self.location_rects.get(normalize_location_code(location))
         if rect is None:
             bounds = self.scaled_bounds()
             return bounds.center()
@@ -2280,8 +2409,7 @@ class TopMapWidget(QWidget):
         y = 0.5 if bounds.height() <= 0 else (point.y() - bounds.top()) / bounds.height()
         x = max(0.0, min(0.999, x))
         y = max(0.0, min(0.999, y))
-        col = min(GRID_COLUMNS - 1, max(0, int(round(x * GRID_COLUMNS - 0.5))))
-        row = min(GRID_ROWS - 1, max(0, int(round(y * GRID_ROWS - 0.5))))
+        col, row = normalized_map_to_grid(x, y)
         snapped_x = (col + 0.5) / GRID_COLUMNS
         snapped_y = (row + 0.5) / GRID_ROWS
         if pallet is not None:
@@ -2290,18 +2418,18 @@ class TopMapWidget(QWidget):
 
     def point_from_pallet(self, pallet: PalletRecord) -> QPoint:
         bounds = self.scaled_bounds()
-        if pallet.map_x is not None and pallet.map_y is not None:
-            if pallet.map_y > 1.0:
-                return self.point_from_waiting_slot(bounds, pallet.map_x, pallet.map_y)
-            map_x, map_y = self.clamped_normalized_for_pallet(pallet, pallet.map_x, pallet.map_y)
-            x = bounds.left() + int(bounds.width() * map_x)
-            y = bounds.top() + int(bounds.height() * map_y)
-            return QPoint(x, y)
+        if self.store.is_entry_waiting_pallet(pallet) and pallet.map_x is not None and pallet.map_y is not None:
+            return self.point_from_waiting_slot(bounds, pallet.map_x, pallet.map_y)
         return self.default_point_for_location(pallet.location_code)
 
     def nearest_location(self, point: QPoint) -> Optional[str]:
         if not self.location_rects:
             return None
+        for location, rect in self.location_rects.items():
+            if location in self.store.blocked_locations:
+                continue
+            if rect.contains(point):
+                return location
         best_location = None
         best_distance = None
         for location, rect in self.location_rects.items():
@@ -2312,8 +2440,6 @@ class TopMapWidget(QWidget):
             if best_distance is None or distance < best_distance:
                 best_distance = distance
                 best_location = location
-            if rect.adjusted(-18, -18, 18, 18).contains(point):
-                return location
         return best_location
 
     def location_at(self, point: QPoint) -> Optional[str]:
@@ -2425,7 +2551,7 @@ class TopMapWidget(QWidget):
             painter.drawRoundedRect(preview_rect, 10, 10)
             painter.setFont(QFont("Consolas", 16, QFont.Bold))
             painter.setPen(QColor("#fff4b1") if self.drag_preview_location in self.store.blocked_locations else QColor("#dff6ff"))
-            painter.drawText(preview_rect, Qt.AlignCenter, self.drag_preview_location)
+            painter.drawText(preview_rect, Qt.AlignCenter, visible_location_code(self.drag_preview_location))
         self.draw_grid_labels(painter, bounds, columns, rows)
 
     def mousePressEvent(self, event) -> None:
