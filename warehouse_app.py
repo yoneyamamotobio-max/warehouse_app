@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QAbstractSpinBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget, QToolTip, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QAbstractSpinBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton, QScrollArea, QScroller, QSpinBox, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget, QToolTip, QVBoxLayout, QWidget
 
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
@@ -102,6 +102,12 @@ ENTRY_WAITING_TOLERANCE = 0.035
 
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def enable_swipe_scroll(scroll: QScrollArea) -> None:
+    viewport = scroll.viewport()
+    viewport.setAttribute(Qt.WA_AcceptTouchEvents, True)
+    QScroller.grabGesture(viewport, QScroller.LeftMouseButtonGesture)
 
 
 @dataclass
@@ -1514,7 +1520,7 @@ class RegistrationDialog(QDialog):
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
 
     def create_step_control(self, editor: QWidget, step_up, step_down, enabled_check) -> QWidget:
-        editor.setStyleSheet("QLineEdit { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:4px 6px; min-height:36px; }")
+        editor.setStyleSheet("QLineEdit { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:6px 8px; min-height:40px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }")
         wrapper = QWidget()
         layout = QHBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1532,7 +1538,7 @@ class RegistrationDialog(QDialog):
             border:1px solid #6ab8ff;
             border-radius:4px;
             padding:2px 0;
-            font:700 11pt 'Yu Gothic UI';
+            font:700 12pt 'Yu Gothic UI', 'Segoe UI';
         }
         QPushButton:hover { background:#3b95e6; }
         QPushButton:disabled {
@@ -1936,8 +1942,8 @@ class EditPalletDialog(QDialog):
             color:#dff6ff;
             border:1px solid #2b5b85;
             border-radius:4px;
-            padding:1px 0;
-            font:700 10pt 'Yu Gothic UI';
+            padding:2px 0;
+            font:700 11pt 'Yu Gothic UI', 'Segoe UI';
         }
         QPushButton:disabled {
             background:#263142;
@@ -2244,6 +2250,7 @@ class TopMapWidget(QWidget):
     palletDoubleClicked = Signal(str)
     blockedLocationToggled = Signal(str, bool)
     palletContextRequested = Signal(str, QPoint)
+    dragStarted = Signal()
 
     def __init__(self, store: InventoryStore, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -2251,6 +2258,7 @@ class TopMapWidget(QWidget):
         self.selected_pallets: set[str] = set()
         self.location_rects: Dict[str, QRect] = {}; self.pallet_rects: Dict[str, QRect] = {}
         self.dragging_pallet = None; self.drag_offset = QPoint(); self.drag_point = QPoint(); self.zoom = 1.0
+        self.is_dragging = False
         self.drag_start_point = QPoint()
         self.drag_preview_location: Optional[str] = None
         self.pan_offset = QPoint()
@@ -2318,15 +2326,15 @@ class TopMapWidget(QWidget):
 
     def draw_grid_labels(self, painter: QPainter, bounds: QRect, columns: int, rows: int) -> None:
         painter.setPen(QColor("#3b6f9e"))
-        painter.setFont(QFont("Consolas", 7))
+        painter.setFont(QFont("Yu Gothic UI", 12, QFont.Bold))
         x_edges = self.grid_edges(bounds.left(), bounds.width(), columns)
         y_edges = self.grid_edges(bounds.top(), bounds.height(), rows)
         for i in range(columns):
             x = (x_edges[i] + x_edges[i + 1]) / 2
-            painter.drawText(QRect(int(x) - 14, bounds.top() - 16, 28, 12), Qt.AlignCenter, column_label(i))
+            painter.drawText(QRect(int(x) - 20, bounds.top() - 22, 40, 18), Qt.AlignCenter, column_label(i))
         for i in range(rows):
             y = (y_edges[i] + y_edges[i + 1]) / 2
-            label_rect = QRect(bounds.right() + 4, int(y) - 7, 32, 14)
+            label_rect = QRect(bounds.right() + 4, int(y) - 9, 40, 18)
             painter.fillRect(label_rect.adjusted(-1, 0, 0, 0), QColor(7, 17, 31, 215))
             painter.drawText(label_rect, Qt.AlignVCenter | Qt.AlignLeft, f"{i + 1:02d}")
 
@@ -2543,15 +2551,22 @@ class TopMapWidget(QWidget):
                 rect.moveTo(self.drag_point - self.drag_offset)
             self.pallet_rects[pallet.pallet_number] = rect; self.draw_pallet(painter, pallet, rect, stack_index=stack_index, stack_count=group_counts.get(group_key, 1))
         if self.dragging_pallet and self.drag_preview_location:
-            preview_rect = QRect(bounds.center().x() - 90, bounds.top() + 12, 180, 42)
+            label_text = visible_location_code(self.drag_preview_location)
+            metrics = painter.fontMetrics()
+            text_width = metrics.horizontalAdvance(label_text)
+            preview_rect = QRect(self.drag_point.x() + 14, self.drag_point.y() - 30, max(52, text_width + 18), 22)
+            max_x = max(8, self.width() - preview_rect.width() - 8)
+            max_y = max(8, self.height() - preview_rect.height() - 8)
+            preview_rect.moveLeft(max(8, min(preview_rect.x(), max_x)))
+            preview_rect.moveTop(max(8, min(preview_rect.y(), max_y)))
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(10, 22, 34, 210))
-            painter.drawRoundedRect(preview_rect, 10, 10)
-            painter.setPen(QPen(QColor("#7fd0ff"), 2))
-            painter.drawRoundedRect(preview_rect, 10, 10)
-            painter.setFont(QFont("Consolas", 16, QFont.Bold))
+            painter.setBrush(QColor(10, 22, 34, 180))
+            painter.drawRoundedRect(preview_rect, 6, 6)
+            painter.setPen(QPen(QColor("#7fd0ff"), 1))
+            painter.drawRoundedRect(preview_rect, 6, 6)
+            painter.setFont(QFont("Yu Gothic UI", 12, QFont.Bold))
             painter.setPen(QColor("#fff4b1") if self.drag_preview_location in self.store.blocked_locations else QColor("#dff6ff"))
-            painter.drawText(preview_rect, Qt.AlignCenter, visible_location_code(self.drag_preview_location))
+            painter.drawText(preview_rect, Qt.AlignCenter, label_text)
         self.draw_grid_labels(painter, bounds, columns, rows)
 
     def mousePressEvent(self, event) -> None:
@@ -2618,20 +2633,30 @@ class TopMapWidget(QWidget):
                 self.selected_pallet = pallet_number
                 self.selected_pallets = {pallet_number}
                 self.dragging_pallet = pallet_number
+                self.is_dragging = True
                 self.drag_start_point = point
                 self.drag_offset = point - rect.topLeft()
                 self.drag_point = point
                 self.drag_preview_location = normalize_location_code(self.store.get_pallet(pallet_number).location_code) if self.store.get_pallet(pallet_number) else None
                 self.palletSelected.emit(pallet_number)
+                self.setToolTip("")
+                QToolTip.hideText()
+                self.dragStarted.emit()
                 self.update()
                 return True
         return False
 
     def update_drag_at(self, point: QPoint) -> None:
         self.drag_point = point
-        if self.dragging_pallet:
+        if self.is_dragging and self.dragging_pallet:
             preview_location = self.nearest_location(point)
             self.drag_preview_location = normalize_location_code(preview_location) if preview_location else None
+            self.hover_pallet = None
+            self.setToolTip("")
+            QToolTip.hideText()
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+            return
         hit = None
         for pallet_number, rect in self.pallet_rects.items():
             if rect.contains(point):
@@ -2649,23 +2674,34 @@ class TopMapWidget(QWidget):
         self.setCursor(Qt.PointingHandCursor if hit and not self.dragging_pallet else Qt.ArrowCursor)
         self.update()
 
+    def finish_drag_state(self, pallet_number: Optional[str], show_detail: bool = False) -> None:
+        self.dragging_pallet = None
+        self.drag_preview_location = None
+        self.is_dragging = False
+        self.setToolTip("")
+        QToolTip.hideText()
+        if pallet_number:
+            self.selected_pallet = pallet_number
+            self.selected_pallets = {pallet_number}
+            self.hover_pallet = pallet_number
+            if show_detail:
+                QTimer.singleShot(0, lambda pn=pallet_number: self.palletSelected.emit(pn))
+        self.update()
+
     def end_drag_at(self, point: QPoint) -> None:
         if not self.dragging_pallet:
             return
+        dragged_pallet = self.dragging_pallet
         moved = (point - self.drag_start_point).manhattanLength()
         if moved <= 6:
-            self.dragging_pallet = None
-            self.drag_preview_location = None
-            self.update()
+            self.finish_drag_state(dragged_pallet, show_detail=True)
             return
         destination = self.nearest_location(point)
         if destination:
             pallet = self.store.get_pallet(self.dragging_pallet)
             map_x, map_y = self.normalized_position_for_location(destination, pallet)
             self.palletMoved.emit(self.dragging_pallet, map_x, map_y, destination)
-        self.dragging_pallet = None
-        self.drag_preview_location = None
-        self.update()
+        self.finish_drag_state(dragged_pallet, show_detail=False)
 
     def event(self, event) -> bool:
         if event.type() in (QEvent.TouchBegin, QEvent.TouchUpdate, QEvent.TouchEnd):
@@ -2673,14 +2709,13 @@ class TopMapWidget(QWidget):
             if not points:
                 self.touch_zoom_distance = None
                 self.touch_zoom_midpoint = None
+                self.is_dragging = False
                 return True
             if event.type() == QEvent.TouchEnd:
                 if self.touch_zoom_distance is not None:
                     self.touch_zoom_distance = None
                     self.touch_zoom_midpoint = None
-                    self.dragging_pallet = None
-                    self.drag_preview_location = None
-                    self.update()
+                    self.finish_drag_state(self.dragging_pallet, show_detail=False)
                     return True
                 self.end_drag_at(points[0].position().toPoint())
                 return True
@@ -2696,8 +2731,7 @@ class TopMapWidget(QWidget):
                     self.clamp_pan()
                     self.update()
                 else:
-                    self.dragging_pallet = None
-                    self.drag_preview_location = None
+                    self.finish_drag_state(self.dragging_pallet, show_detail=False)
                 self.touch_zoom_distance = distance
                 self.touch_zoom_midpoint = midpoint
                 return True
@@ -2907,12 +2941,12 @@ class IsometricMapWidget(QWidget):
         painter.setBrush(fill); painter.drawPolygon(face_b)
         painter.setBrush(fill); painter.drawPolygon(top)
         label_anchor = min([QPointF(point.x(), point.y() - height) for point in corners_bottom], key=lambda point: point.y() + (point.x() * 0.02))
-        painter.setPen(QColor("#daf5ff")); painter.setFont(QFont("Consolas", 7, QFont.Bold)); painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 13), pallet.pallet_number)
-        painter.setFont(QFont("Yu Gothic UI", 6)); painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 24), pallet.summary_text[:14])
+        painter.setPen(QColor("#daf5ff")); painter.setFont(QFont("Yu Gothic UI", 10, QFont.Bold)); painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 15), pallet.pallet_number)
+        painter.setFont(QFont("Yu Gothic UI", 10)); painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 29), pallet.summary_text[:14])
         if waiting_move:
             painter.setPen(QColor("#ffd866" if self.attention_visible else "#b59234"))
-            painter.setFont(QFont("Yu Gothic UI", 7, QFont.Bold))
-            painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 36), "入口待機")
+            painter.setFont(QFont("Yu Gothic UI", 10, QFont.Bold))
+            painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 40), "入口待機")
         min_x = min(point.x() for point in corners_bottom)
         max_x = max(point.x() for point in corners_bottom)
         min_y = min(point.y() for point in corners_bottom) - height
@@ -2930,7 +2964,7 @@ class IsometricMapWidget(QWidget):
         painter.drawEllipse(QPointF(entrance_point.x(), entrance_point.y()), 8, 8)
         painter.drawLine(QPointF(entrance_point.x(), entrance_point.y()), QPointF(entrance_point.x(), entrance_point.y() + 26))
         painter.setPen(QColor("#7fd0ff"))
-        painter.setFont(QFont("Yu Gothic UI", 8, QFont.Bold))
+        painter.setFont(QFont("Yu Gothic UI", 12, QFont.Bold))
         painter.drawText(QRect(int(entrance_point.x() - 46), int(entrance_point.y() + 28), 92, 18), Qt.AlignCenter, "入口")
         groups: Dict[str, List[PalletRecord]] = {}
         for pallet in self.store.pallets:
@@ -2962,7 +2996,7 @@ class IsometricMapWidget(QWidget):
             painter.setPen(QPen(QColor("#8fd8ff"), 1, Qt.DotLine))
             painter.drawLine(entrance_point, selected_base)
         view_names = {0: "入口手前", 1: "右側", 2: "奥側", 3: "左側"}
-        painter.setPen(QColor("#6d90b5")); painter.setFont(QFont("Yu Gothic UI", 9)); painter.drawText(bounds.adjusted(6, 6, -6, -6), Qt.AlignTop | Qt.AlignLeft, f"45度ビュー / {view_names.get(self.view_rotation % 4, '')}")
+        painter.setPen(QColor("#6d90b5")); painter.setFont(QFont("Yu Gothic UI", 12, QFont.Bold)); painter.drawText(bounds.adjusted(6, 6, -6, -6), Qt.AlignTop | Qt.AlignLeft, f"45度ビュー / {view_names.get(self.view_rotation % 4, '')}")
 
     def mouseMoveEvent(self, event) -> None:
         point = event.position().toPoint()
@@ -3112,7 +3146,7 @@ class MainWindow(QMainWindow):
         self.cell_popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.cell_popup.setStyleSheet(
             "QLabel { background:#fff7cc; color:#111111; border:1px solid #806000; "
-            "border-radius:6px; padding:8px; font:10.5pt 'Yu Gothic UI'; }"
+            "border-radius:6px; padding:10px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }"
         )
         self.cell_popup.hide()
         self.cell_popup_timer.timeout.connect(self.cell_popup.hide)
@@ -3125,7 +3159,7 @@ class MainWindow(QMainWindow):
 
     def build_ui(self) -> None:
         central = QWidget(); self.setCentralWidget(central); root = QVBoxLayout(central); root.setContentsMargins(14, 14, 14, 14); root.setSpacing(10)
-        self.title_label = QLabel("大阪工場倉庫"); self.title_label.setStyleSheet("font:700 18px 'Yu Gothic UI'; color:#7fd0ff;")
+        self.title_label = QLabel("大阪工場倉庫"); self.title_label.setStyleSheet("font:700 18px 'Yu Gothic UI', 'Segoe UI'; color:#7fd0ff;")
         self.summary_label = QLabel(); self.summary_label.setStyleSheet("color:#89a4c2;"); self.summary_label.setWordWrap(True)
         self.new_button = QPushButton("新規登録"); self.new_button.clicked.connect(self.open_registration)
         self.help_button = QPushButton("ヘルプ"); self.help_button.clicked.connect(self.open_help_tab)
@@ -3137,8 +3171,6 @@ class MainWindow(QMainWindow):
         self.stack_up_button = QPushButton("段を上げる"); self.stack_up_button.clicked.connect(lambda: self.adjust_selected_stack(1))
         self.stack_down_button = QPushButton("段を下げる"); self.stack_down_button.clicked.connect(lambda: self.adjust_selected_stack(-1))
         self.rotate_button = QPushButton("向き変更"); self.rotate_button.clicked.connect(self.rotate_selected_pallet)
-        self.zoom_in_button = QPushButton("拡大"); self.zoom_out_button = QPushButton("縮小"); self.zoom_reset_button = QPushButton("等倍")
-        self.zoom_in_button.clicked.connect(self.zoom_in_current_view); self.zoom_out_button.clicked.connect(self.zoom_out_current_view); self.zoom_reset_button.clicked.connect(self.reset_zoom_current_view)
         self.search_input = QLineEdit(); self.search_input.setPlaceholderText("例: 39 LL 10 A"); self.search_input.textChanged.connect(self.refresh_all)
         self.copy_inventory_button = QPushButton("一覧コピー"); self.copy_inventory_button.clicked.connect(self.copy_inventory_table)
         self.export_inventory_button = QPushButton("棚卸データ出力"); self.export_inventory_button.clicked.connect(self.copy_inventory_summary)
@@ -3147,13 +3179,13 @@ class MainWindow(QMainWindow):
         self.export_button = QPushButton("Export"); self.export_button.clicked.connect(self.export_data)
         self.import_button = QPushButton("Import"); self.import_button.clicked.connect(self.import_data)
         self.clear_selection_button = QPushButton("選択解除"); self.clear_selection_button.clicked.connect(self.clear_selection)
-        self.action_buttons = [self.new_button, self.help_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_up_button, self.stack_down_button, self.rotate_button, self.zoom_in_button, self.zoom_out_button, self.zoom_reset_button, self.export_button, self.import_button]
+        self.action_buttons = [self.new_button, self.help_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_up_button, self.stack_down_button, self.rotate_button, self.export_button, self.import_button]
         for button in self.action_buttons: button.setMinimumHeight(40)
         self.search_input.setMinimumHeight(40)
         self.copy_inventory_button.setMinimumHeight(40)
         title_row = QHBoxLayout(); title_row.addWidget(self.title_label); title_row.addWidget(self.summary_label, 1)
         action_row = QHBoxLayout()
-        for widget in [self.new_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_down_button, self.stack_up_button, self.rotate_button, self.zoom_in_button, self.zoom_out_button, self.zoom_reset_button]:
+        for widget in [self.new_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_down_button, self.stack_up_button, self.rotate_button]:
             action_row.addWidget(widget)
         action_row.addStretch(1)
         action_row.addWidget(self.export_button)
@@ -3199,7 +3231,7 @@ class MainWindow(QMainWindow):
         resize_row.addStretch(1)
         resize_row.addWidget(self.detail_resize_handle)
         detail_root.addLayout(resize_row)
-        self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.set_blocked_location_with_validation); self.top_map.palletContextRequested.connect(self.open_pallet_context_menu); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
+        self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.set_blocked_location_with_validation); self.top_map.palletContextRequested.connect(self.open_pallet_context_menu); self.top_map.dragStarted.connect(self.hide_detail_for_drag); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
         self.iso_map = IsometricMapWidget(self.store); self.iso_map.palletSelected.connect(self.select_pallet); self.iso_map.selectionCleared.connect(self.clear_selection); self.iso_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.iso_map.palletContextRequested.connect(self.open_pallet_context_menu)
         self.iso_rotate_button = QPushButton("視点90°")
         self.iso_rotate_button.setParent(self.iso_map)
@@ -3219,7 +3251,8 @@ class MainWindow(QMainWindow):
         self.inventory_table.horizontalHeader().setSectionsClickable(True)
         self.inventory_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.inventory_table.horizontalHeader().setMinimumSectionSize(72)
-        self.inventory_table.horizontalHeader().setMinimumHeight(38)
+        self.inventory_table.horizontalHeader().setMinimumHeight(42)
+        self.inventory_table.verticalHeader().setDefaultSectionSize(36)
         self.inventory_table.setColumnWidth(0, 88)
         self.inventory_table.setColumnWidth(1, 70)
         self.inventory_table.setColumnWidth(2, 76)
@@ -3262,7 +3295,8 @@ class MainWindow(QMainWindow):
         self.shipment_table.horizontalHeader().setSectionsClickable(True)
         self.shipment_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.shipment_table.horizontalHeader().setMinimumSectionSize(72)
-        self.shipment_table.horizontalHeader().setMinimumHeight(38)
+        self.shipment_table.horizontalHeader().setMinimumHeight(42)
+        self.shipment_table.verticalHeader().setDefaultSectionSize(36)
         self.shipment_table.setContextMenuPolicy(Qt.CustomContextMenu); self.shipment_table.customContextMenuRequested.connect(self.open_shipment_context_menu)
         self.shipment_table.setColumnWidth(0, 118)
         self.shipment_table.setColumnWidth(1, 130)
@@ -3293,6 +3327,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        enable_swipe_scroll(scroll)
         body = QWidget()
         layout = QVBoxLayout(body)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -3316,7 +3351,7 @@ class MainWindow(QMainWindow):
                   <div style="font-weight:700; color:#ffe28a; margin:10px 0 4px 0;">■ 加工 / 裏表</div>
                   <div>・日本語OK</div>
                   <div>・英数字は半角大文字へ変換</div>
-                  <div>・<code>￥</code> <code>\</code> <code>。</code> <code>？</code> <code>?</code> は <code>/</code> に変換</div>
+                  <div>・<code>￥</code> <code>\\</code> <code>。</code> <code>？</code> <code>?</code> は <code>/</code> に変換</div>
                   <div style="margin-top:4px; color:#b9d8f5;">例: <code>ｓ／ｓ</code> → <code>S/S</code> / <code>Ｃ￥Ｃ</code> → <code>C/C</code> / <code>Ｓ。Ｓ</code> → <code>S/S</code> / <code>エンボスｓ／ｓ</code> → <code>エンボスS/S</code></div>
 
                   <div style="font-weight:700; color:#ffe28a; margin:10px 0 4px 0;">■ 厚み(mm)</div>
@@ -3364,11 +3399,11 @@ class MainWindow(QMainWindow):
             card_layout.setContentsMargins(14, 12, 14, 12)
             card_layout.setSpacing(8)
             heading_label = QLabel(heading)
-            heading_label.setStyleSheet("font:700 12.5pt 'Yu Gothic UI'; color:#7fd0ff;")
+            heading_label.setStyleSheet("font:700 13pt 'Yu Gothic UI', 'Segoe UI'; color:#7fd0ff;")
             body_label = QLabel(text)
             body_label.setTextFormat(Qt.RichText if "<" in text and ">" in text else Qt.PlainText)
             body_label.setWordWrap(True)
-            body_label.setStyleSheet("color:#e7f3ff; font:10.5pt 'Yu Gothic UI'; line-height:1.7;")
+            body_label.setStyleSheet("color:#e7f3ff; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; line-height:1.8;")
             card.setStyleSheet("QFrame { background:#0d1726; border:1px solid #2b455f; border-radius:10px; }")
             card_layout.addWidget(heading_label)
             card_layout.addWidget(body_label)
@@ -3413,7 +3448,7 @@ class MainWindow(QMainWindow):
         color = pallet_color(current_pallet) if isinstance(current_pallet, PalletRecord) else QColor("#f0c860")
         border_color = color.name()
         soft = QColor(color)
-        soft.setAlpha(78)
+        soft.setAlpha(68)
         self.detail_frame.setStyleSheet(f"background:{soft.name(QColor.HexArgb)}; border:2px solid {border_color}; border-radius:8px;")
         self.stack_detail_selector.setStyleSheet(
             f"QListWidget#stackDetailSelector {{ background:transparent; border:none; outline:none; padding:0; }}"
@@ -3421,7 +3456,7 @@ class MainWindow(QMainWindow):
             f"QListWidget#stackDetailSelector::item:selected {{ background:{border_color}; color:#10161e; }}"
         )
         self.stack_detail_pages.setStyleSheet(
-            f"QLabel {{ color:#fff7d6; font:{'9pt' if narrow else ('9.5pt' if compact else '10pt')} 'Yu Gothic UI'; }}"
+            f"QLabel {{ background:transparent; color:#fff7d6; font:{'10pt' if narrow else ('11pt' if compact else '11.5pt')} 'Yu Gothic UI', 'Segoe UI'; }}"
         )
 
     def update_tab_visuals(self) -> None:
@@ -3441,7 +3476,7 @@ class MainWindow(QMainWindow):
     def handle_tab_changed(self, _index: int) -> None:
         is_inventory = self.tabs.currentIndex() == 2
         is_shipment = self.tabs.currentIndex() == 3
-        is_help = self.tabs.currentWidget() == self.help_tab_widget
+        is_help = hasattr(self, "help_tab_widget") and self.tabs.currentWidget() == self.help_tab_widget
         self.search_input.setVisible(is_inventory)
         self.copy_inventory_button.setVisible(is_inventory)
         self.export_inventory_button.setVisible(is_inventory)
@@ -3559,8 +3594,8 @@ class MainWindow(QMainWindow):
         narrow = width < 980
         button_height = 34 if compact else 40
         combo_height = 34 if compact else 40
-        self.title_label.setStyleSheet(f"font:700 {'15' if compact else '18'}px 'Consolas'; color:#7fd0ff;")
-        self.summary_label.setStyleSheet(f"color:#89a4c2; font:{'8.5pt' if compact else '10pt'} 'Yu Gothic UI';")
+        self.title_label.setStyleSheet(f"font:700 {'16' if compact else '18'}px 'Yu Gothic UI', 'Segoe UI'; color:#7fd0ff;")
+        self.summary_label.setStyleSheet(f"color:#89a4c2; font:{'10pt' if compact else '11pt'} 'Yu Gothic UI', 'Segoe UI';")
         text_map = {
             self.new_button: "新規" if compact else "新規登録",
             self.help_button: "ヘルプ",
@@ -3572,16 +3607,13 @@ class MainWindow(QMainWindow):
             self.stack_up_button: "上げる" if compact else "段を上げる",
             self.stack_down_button: "下げる" if compact else "段を下げる",
             self.rotate_button: "向き" if compact else "向き変更",
-            self.zoom_in_button: "拡大",
-            self.zoom_out_button: "縮小",
-            self.zoom_reset_button: "等倍",
             self.export_button: "出力" if compact else "Export",
             self.import_button: "読込" if compact else "Import",
         }
         for button in self.action_buttons:
             button.setMinimumHeight(button_height)
             button.setText(text_map.get(button, button.text()))
-        self.search_input.setMinimumHeight(combo_height)
+        self.search_input.setMinimumHeight(max(combo_height, 40))
         self.copy_inventory_button.setMinimumHeight(combo_height)
         self.export_inventory_button.setMinimumHeight(combo_height)
         self.restore_shipment_button.setMinimumHeight(combo_height)
@@ -3645,6 +3677,11 @@ class MainWindow(QMainWindow):
         self.detail_frame.raise_()
         self.detail_frame.show()
 
+    def hide_detail_for_drag(self) -> None:
+        if hasattr(self, "detail_frame"):
+            self.detail_frame.hide()
+        QToolTip.hideText()
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.apply_responsive_layout()
@@ -3652,10 +3689,10 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self) -> None:
         self.setStyleSheet("""
-        QWidget { background:#091522; color:#e7f3ff; font:10pt 'Yu Gothic UI'; }
+        QWidget { background:#091522; color:#e7f3ff; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }
         QFrame { background:#0f1d2c; border:1px solid #163450; border-radius:8px; }
-        QLineEdit, QComboBox, QTableWidget { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:6px; }
-        QSpinBox, QAbstractSpinBox { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:4px 30px 4px 6px; min-height:34px; }
+        QLineEdit, QComboBox, QTableWidget { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:7px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }
+        QSpinBox, QAbstractSpinBox { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:5px 30px 5px 6px; min-height:38px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }
         QSpinBox::up-button, QAbstractSpinBox::up-button {
             subcontrol-origin: border;
             subcontrol-position: top right;
@@ -3677,10 +3714,10 @@ class MainWindow(QMainWindow):
         }
         QSpinBox::up-button:hover, QAbstractSpinBox::up-button:hover,
         QSpinBox::down-button:hover, QAbstractSpinBox::down-button:hover { background:#1d5d99; }
-        QPushButton { background:#1d5d99; color:white; border:none; border-radius:8px; padding:8px 14px; font-weight:600; }
+        QPushButton { background:#1d5d99; color:white; border:none; border-radius:8px; padding:9px 14px; font:600 12pt 'Yu Gothic UI', 'Segoe UI'; }
         QPushButton:hover { background:#2675c2; }
         QPushButton:checked { background:#8f3d47; }
-        QHeaderView::section { background:#11253d; color:#9dd9ff; border:none; padding:6px; }
+        QHeaderView::section { background:#11253d; color:#9dd9ff; border:none; padding:8px 6px; font:600 12.5pt 'Yu Gothic UI', 'Segoe UI'; }
         QTableWidget#inventoryTable {
             gridline-color:#34506a;
             border:1px solid #34506a;
@@ -3688,16 +3725,18 @@ class MainWindow(QMainWindow):
             alternate-background-color:#0b1828;
         }
         QTableWidget#inventoryTable::item {
-            padding:6px;
+            padding:7px 6px;
             border-right:1px solid #24384d;
             border-bottom:1px solid #24384d;
+            font:11pt 'Yu Gothic UI', 'Segoe UI';
         }
         QTableWidget#inventoryTable QHeaderView::section {
             background:#102033;
             color:#f6fbff;
             border-right:2px solid #5f7890;
             border-bottom:1px solid #5f7890;
-            padding:8px 6px;
+            padding:9px 6px;
+            font:700 12.5pt 'Yu Gothic UI', 'Segoe UI';
         }
         QTableWidget#shipmentTable {
             gridline-color:#34506a;
@@ -3706,23 +3745,26 @@ class MainWindow(QMainWindow):
             alternate-background-color:#0b1828;
         }
         QTableWidget#shipmentTable::item {
-            padding:6px;
+            padding:7px 6px;
             border-right:1px solid #24384d;
             border-bottom:1px solid #24384d;
+            font:11pt 'Yu Gothic UI', 'Segoe UI';
         }
         QTableWidget#shipmentTable QHeaderView::section {
             background:#102033;
             color:#f6fbff;
             border-right:2px solid #5f7890;
             border-bottom:1px solid #5f7890;
-            padding:8px 6px;
+            padding:9px 6px;
+            font:700 12.5pt 'Yu Gothic UI', 'Segoe UI';
         }
         QLabel#inventoryHint {
             color:#8fb6d8;
             background:#0c1827;
             border:1px solid #24425e;
             border-radius:6px;
-            padding:6px 8px;
+            padding:8px 10px;
+            font:11pt 'Yu Gothic UI', 'Segoe UI';
         }
         QFrame#detailResizeHandle {
             background:#18304b;
@@ -3734,7 +3776,7 @@ class MainWindow(QMainWindow):
             border-color:#8fc7ff;
         }
         QTabWidget::pane { border:1px solid #1a3c60; background:#07111f; }
-        QTabBar::tab { background:#11253d; color:#88c3f0; padding:10px 16px; margin-right:4px; border-top-left-radius:6px; border-top-right-radius:6px; }
+        QTabBar::tab { background:#11253d; color:#88c3f0; padding:11px 16px; margin-right:4px; border-top-left-radius:6px; border-top-right-radius:6px; font:600 12pt 'Yu Gothic UI', 'Segoe UI'; }
         QTabBar::tab:selected { background:#1d5d99; color:white; }
         """)
         self.update_tab_visuals()
