@@ -1448,6 +1448,8 @@ class RegistrationDialog(QDialog):
         content_layout.setSpacing(12)
 
         input_scroll = QScrollArea()
+        self.input_scroll = input_scroll
+        self.keyboard_scroll_widgets: List[QWidget] = []
         input_scroll.setWidgetResizable(True)
         input_scroll.setFrameShape(QFrame.NoFrame)
         input_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1602,16 +1604,63 @@ class RegistrationDialog(QDialog):
         self.color.currentIndexChanged.connect(self.update_color_controls)
         self.update_color_controls()
         self.refresh_item_editor_buttons()
+        self.install_keyboard_scroll_handlers()
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         ok_button = buttons.button(QDialogButtonBox.Ok)
         cancel_button = buttons.button(QDialogButtonBox.Cancel)
         if ok_button is not None:
+            ok_button.setText("完了")
             ok_button.setDefault(False)
             ok_button.setAutoDefault(False)
         if cancel_button is not None:
             cancel_button.setDefault(False)
             cancel_button.setAutoDefault(False)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
+
+    def install_keyboard_scroll_handlers(self) -> None:
+        widgets: List[QWidget] = [
+            self.pallet_number,
+            self.received_date,
+            self.part_code,
+            self.thickness,
+            self.finish,
+            self.sheet_count,
+            self.note,
+        ]
+        grade_editor = self.grade.lineEdit() if self.grade.isEditable() else None
+        if grade_editor is not None:
+            widgets.append(grade_editor)
+        for widget in widgets:
+            widget.installEventFilter(self)
+        self.keyboard_scroll_widgets = widgets
+
+    def eventFilter(self, source, event) -> bool:
+        if source in getattr(self, "keyboard_scroll_widgets", []) and event.type() in (QEvent.FocusIn, QEvent.MouseButtonPress, QEvent.TouchBegin):
+            widget = source
+            QTimer.singleShot(0, lambda w=widget: self.scroll_input_widget_into_keyboard_safe_area(w))
+            QTimer.singleShot(250, lambda w=widget: self.scroll_input_widget_into_keyboard_safe_area(w))
+        return super().eventFilter(source, event)
+
+    def scroll_input_widget_into_keyboard_safe_area(self, widget: QWidget) -> None:
+        scroll = getattr(self, "input_scroll", None)
+        if scroll is None or widget is None or not widget.isVisible():
+            return
+        viewport = scroll.viewport()
+        top_left = widget.mapTo(viewport, QPoint(0, 0))
+        target_top = top_left.y()
+        target_bottom = target_top + widget.height()
+        top_margin = 8
+        bottom_margin = 16
+        keyboard_margin = min(max(int(viewport.height() * 0.34), 120), 260)
+        safe_bottom = max(top_margin + 1, viewport.height() - keyboard_margin - bottom_margin)
+        scroll_bar = scroll.verticalScrollBar()
+        new_value = scroll_bar.value()
+        if target_bottom > safe_bottom:
+            new_value += target_bottom - safe_bottom
+        elif target_top < top_margin:
+            new_value += target_top - top_margin
+        if new_value != scroll_bar.value():
+            scroll_bar.setValue(max(scroll_bar.minimum(), min(scroll_bar.maximum(), new_value)))
 
     def create_step_control(self, editor: QWidget, step_up, step_down, enabled_check) -> QWidget:
         editor.setStyleSheet("QLineEdit { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:6px 8px; min-height:40px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }")
