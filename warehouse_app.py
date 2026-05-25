@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSettings, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QAbstractSpinBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton, QScrollArea, QScroller, QSpinBox, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget, QToolTip, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QAbstractItemView, QAbstractSpinBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton, QScrollArea, QScroller, QSpinBox, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolTip, QVBoxLayout, QWidget
 
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
@@ -207,12 +207,24 @@ class ShipmentRecord:
         return f"{self.items[0].identifier} 他{len(self.items) - 1}件"
 
 
+@dataclass
+class MapNoteRecord:
+    note_id: str = field(default_factory=lambda: uuid4().hex)
+    text: str = ""
+    size: str = "LL"
+    map_x: Optional[float] = None
+    map_y: Optional[float] = None
+    color_key: str = "YELLOW"
+    updated_at: str = field(default_factory=now_text)
+
+
 class InventoryStore:
     def __init__(self) -> None:
         self.locations = list(DEFAULT_LOCATIONS)
         self.blocked_locations: List[str] = []
         self.pallets: List[PalletRecord] = []
         self.shipments: List[ShipmentRecord] = []
+        self.map_notes: List[MapNoteRecord] = []
 
     def ensure_defaults(self) -> None:
         for location in DEFAULT_LOCATIONS:
@@ -305,6 +317,12 @@ class InventoryStore:
                 return pallet
         return None
 
+    def get_map_note(self, note_id: str) -> Optional[MapNoteRecord]:
+        for note in self.map_notes:
+            if note.note_id == note_id:
+                return note
+        return None
+
     def unique_pallet_number(self, base_number: str, ignore: Optional[str] = None) -> str:
         candidate = (base_number or "").strip() or "PALLET"
         existing = {pallet.pallet_number for pallet in self.pallets if pallet.pallet_number != ignore}
@@ -353,6 +371,18 @@ class InventoryStore:
                 }
                 for shipment in self.shipments
             ],
+            "map_notes": [
+                {
+                    "note_id": note.note_id,
+                    "text": note.text,
+                    "size": note.size,
+                    "map_x": note.map_x,
+                    "map_y": note.map_y,
+                    "color_key": note.color_key,
+                    "updated_at": note.updated_at,
+                }
+                for note in self.map_notes
+            ],
         }
 
     @classmethod
@@ -378,6 +408,14 @@ class InventoryStore:
             raw_last_manual = str(shipment_data.get("last_manual_color_key", raw_color_key if raw_color_key != "AUTO" else auto_color_key_for_items(items))).upper()
             effective_color_key = resolve_effective_color_key(raw_color_mode, raw_last_manual, items)
             store.shipments.append(ShipmentRecord(shipment_id=shipment_data.get("shipment_id", uuid4().hex), shipped_at=shipment_data.get("shipped_at", now_text()), pallet_number=shipment_data.get("pallet_number", ""), location_code=normalize_location_code(shipment_data.get("location_code", "")), received_date=shipment_data.get("received_date", ""), color_key=effective_color_key, color_mode=raw_color_mode, last_manual_color_key=raw_last_manual, orientation=int(shipment_data.get("orientation", 0)), map_x=shipment_data.get("map_x"), map_y=shipment_data.get("map_y"), items=items))
+        for note_data in payload.get("map_notes", []):
+            size = str(note_data.get("size", "LL")).upper()
+            if size not in VALID_SIZES:
+                size = "LL"
+            color_key = str(note_data.get("color_key", "YELLOW")).upper()
+            if color_key not in COLOR_PRESETS or color_key == "AUTO":
+                color_key = "YELLOW"
+            store.map_notes.append(MapNoteRecord(note_id=note_data.get("note_id", uuid4().hex), text=str(note_data.get("text", "")), size=size, map_x=note_data.get("map_x"), map_y=note_data.get("map_y"), color_key=color_key, updated_at=note_data.get("updated_at", now_text())))
         store.ensure_defaults()
         store.restore_blocked_locations_with_validation(stored_blocked_locations)
         store.normalize_stacks()
@@ -827,11 +865,28 @@ def pallet_popup_text(store: "InventoryStore", pallet: PalletRecord) -> str:
     return "\n".join(lines)
 
 
+def footprint_mm_for_size(size: str, orientation: int = 0) -> Tuple[int, int]:
+    size = str(size or "LL").upper()
+    width, depth = (1400, 1300) if size == "L" else ((3500, 1400) if size == "OL" else (2300, 1300))
+    return (depth, width) if orientation % 180 == 90 else (width, depth)
+
+
 def footprint_mm(pallet: PalletRecord) -> Tuple[int, int]:
     sizes = [item.size.upper() for item in pallet.items] or ["LL"]
     size = max(sizes, key=lambda code: {"L": 1, "LL": 2, "EL": 2, "OL": 3}.get(code, 0))
-    width, depth = (1400, 1300) if size == "L" else ((3500, 1400) if size == "OL" else (2300, 1300))
-    return (depth, width) if pallet.orientation % 180 == 90 else (width, depth)
+    return footprint_mm_for_size(size, pallet.orientation)
+
+
+def map_note_title(note: MapNoteRecord) -> str:
+    for line in str(note.text or "").splitlines():
+        title = line.strip()
+        if title:
+            return title
+    return "メモ"
+
+
+def map_note_popup_text(note: MapNoteRecord) -> str:
+    return "\n".join([map_note_title(note), f"サイズ: {note.size}", "", note.text])
 
 
 def parse_thickness_value(thickness_text: str) -> float:
@@ -2435,6 +2490,64 @@ class TransferDialog(QDialog):
         super().accept()
 
 
+class MapNoteDialog(QDialog):
+    def __init__(self, parent: Optional[QWidget] = None, note: Optional[MapNoteRecord] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("メモ編集" if note is not None else "メモ追加")
+        self.resize(520, 420)
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+        self.text_edit = QTextEdit()
+        self.text_edit.setPlaceholderText("例:\n空パレット10枚\n品番確認待ち")
+        self.text_edit.setAcceptRichText(False)
+        self.text_edit.setMinimumHeight(220)
+        self.size_combo = QComboBox()
+        self.size_combo.addItems(VALID_SIZES)
+        self.size_combo.setCurrentText("LL")
+        self.color_combo = QComboBox()
+        populate_color_combo(self.color_combo, "YELLOW", include_auto=False)
+        if note is not None:
+            self.text_edit.setPlainText(note.text)
+            self.size_combo.setCurrentText(note.size if note.size in VALID_SIZES else "LL")
+            color_index = self.color_combo.findData(note.color_key)
+            if color_index >= 0:
+                self.color_combo.setCurrentIndex(color_index)
+        form.addRow("本文", self.text_edit)
+        form.addRow("サイズ", self.size_combo)
+        form.addRow("色", self.color_combo)
+        root.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        ok_button = buttons.button(QDialogButtonBox.Ok)
+        if ok_button is not None:
+            ok_button.setText("更新" if note is not None else "登録")
+            ok_button.setDefault(False)
+            ok_button.setAutoDefault(False)
+        cancel_button = buttons.button(QDialogButtonBox.Cancel)
+        if cancel_button is not None:
+            cancel_button.setDefault(False)
+            cancel_button.setAutoDefault(False)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def payload(self) -> Optional[Tuple[str, str, str]]:
+        text = self.text_edit.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "メモ追加", "本文を入力してください。")
+            return None
+        if len(text) > 1000:
+            QMessageBox.warning(self, "メモ追加", "本文は1000文字以内で入力してください。")
+            return None
+        size = self.size_combo.currentText()
+        color_key = self.color_combo.currentData() or "YELLOW"
+        return text, size, str(color_key)
+
+    def accept(self) -> None:
+        if self.payload() is None:
+            return
+        super().accept()
+
+
 class TopMapWidget(QWidget):
     palletSelected = Signal(str)
     palletMoved = Signal(str, float, float, str)
@@ -2442,14 +2555,19 @@ class TopMapWidget(QWidget):
     palletDoubleClicked = Signal(str)
     blockedLocationToggled = Signal(str, bool)
     palletContextRequested = Signal(str, QPoint)
+    mapNoteSelected = Signal(str)
+    mapNoteDoubleClicked = Signal(str)
+    mapNoteMoved = Signal(str, float, float)
+    mapNoteContextRequested = Signal(str, QPoint)
     dragStarted = Signal()
 
     def __init__(self, store: InventoryStore, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.store = store; self.selected_pallet = None; self.hover_pallet = None
+        self.store = store; self.selected_pallet = None; self.hover_pallet = None; self.selected_note = None
         self.selected_pallets: set[str] = set()
-        self.location_rects: Dict[str, QRect] = {}; self.pallet_rects: Dict[str, QRect] = {}
+        self.location_rects: Dict[str, QRect] = {}; self.pallet_rects: Dict[str, QRect] = {}; self.note_rects: Dict[str, QRect] = {}
         self.dragging_pallet = None; self.drag_offset = QPoint(); self.drag_point = QPoint(); self.zoom = 1.0
+        self.dragging_note = None
         self.is_dragging = False
         self.drag_start_point = QPoint()
         self.drag_preview_location: Optional[str] = None
@@ -2478,7 +2596,7 @@ class TopMapWidget(QWidget):
         return rect
 
     def has_entry_waiting_pallets(self) -> bool:
-        return any(is_entry_staged_pallet(pallet) for pallet in self.store.pallets)
+        return any(is_entry_staged_pallet(pallet) for pallet in self.store.pallets) or any((note.map_y or 0.0) > 1.0 for note in self.store.map_notes)
 
     def entry_waiting_area_rect(self, bounds: QRect) -> QRect:
         available = self.rect().adjusted(18, 18, -18, -18)
@@ -2603,6 +2721,24 @@ class TopMapWidget(QWidget):
         clamped_y = min(max(map_y, max(0.0, min_y)), min(0.999, max_y))
         return clamped_x, clamped_y
 
+    def clamped_normalized_for_note(self, note: MapNoteRecord, map_x: float, map_y: float) -> Tuple[float, float]:
+        if map_y > 1.0:
+            return max(0.0, min(0.999, map_x)), map_y
+        bounds = self.scaled_bounds()
+        if bounds.width() <= 0 or bounds.height() <= 0:
+            return map_x, map_y
+        width_mm, depth_mm = footprint_mm_for_size(note.size)
+        scale = self.draw_scale(bounds)
+        half_w = (width_mm * scale) / 2.0
+        half_h = (depth_mm * scale) / 2.0
+        min_x = half_w / bounds.width()
+        max_x = (bounds.width() - half_w) / bounds.width()
+        min_y = half_h / bounds.height()
+        max_y = (bounds.height() - half_h) / bounds.height()
+        clamped_x = min(max(map_x, max(0.0, min_x)), min(0.999, max_x))
+        clamped_y = min(max(map_y, max(0.0, min_y)), min(0.999, max_y))
+        return clamped_x, clamped_y
+
     def normalized_position(self, point: QPoint, pallet: Optional[PalletRecord] = None) -> Tuple[float, float]:
         bounds = self.scaled_bounds()
         x = 0.5 if bounds.width() <= 0 else (point.x() - bounds.left()) / bounds.width()
@@ -2621,6 +2757,14 @@ class TopMapWidget(QWidget):
         if self.store.is_entry_waiting_pallet(pallet) and pallet.map_x is not None and pallet.map_y is not None:
             return self.point_from_waiting_slot(bounds, pallet.map_x, pallet.map_y)
         return self.default_point_for_location(pallet.location_code)
+
+    def point_from_note(self, note: MapNoteRecord) -> QPoint:
+        bounds = self.scaled_bounds()
+        map_x = note.map_x if note.map_x is not None else ENTRY_MAP_X
+        map_y = note.map_y if note.map_y is not None else ENTRY_MAP_Y
+        if map_y > 1.0:
+            return self.point_from_waiting_slot(bounds, map_x, map_y)
+        return QPoint(bounds.left() + int(bounds.width() * map_x), bounds.top() + int(bounds.height() * map_y))
 
     def nearest_location(self, point: QPoint) -> Optional[str]:
         if not self.location_rects:
@@ -2657,6 +2801,61 @@ class TopMapWidget(QWidget):
 
     def tooltip_text(self, pallet: PalletRecord) -> str:
         return pallet_popup_text(self.store, pallet)
+
+    def draw_note(self, painter: QPainter, note: MapNoteRecord, rect: QRect) -> None:
+        painter.save()
+        selected = note.note_id == self.selected_note
+        active = note.note_id == self.dragging_note or selected
+        base_color = QColor(COLOR_PRESETS.get(note.color_key, COLOR_PRESETS["YELLOW"])[1] or "#FFC34D")
+        fill = QColor(base_color.lighter(155))
+        fill.setAlpha(28)
+        hatch = QColor(base_color.lighter(125))
+        hatch.setAlpha(170)
+        outline = QColor("#fff8c9" if active else base_color.lighter(115))
+        if selected and self.attention_visible:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#7fd0ff"), 4, Qt.DashLine))
+            painter.drawRoundedRect(rect.adjusted(-10, -10, 10, 10), 8, 8)
+        painter.setBrush(fill)
+        painter.setPen(QPen(outline, 5 if selected else 4))
+        painter.drawRoundedRect(rect, 5, 5)
+        painter.setClipRect(rect.adjusted(2, 2, -2, -2))
+        painter.setPen(QPen(hatch, 2))
+        step = 10
+        for offset in range(-rect.height(), rect.width() + rect.height(), step):
+            painter.drawLine(rect.left() + offset, rect.bottom(), rect.left() + offset + rect.height(), rect.top())
+        painter.setClipping(False)
+        fold_size = max(10, min(18, rect.width() // 5))
+        fold = QPolygonF([
+            QPointF(rect.right() - fold_size, rect.top()),
+            QPointF(rect.right(), rect.top()),
+            QPointF(rect.right(), rect.top() + fold_size),
+        ])
+        fold_fill = QColor("#ffe07a")
+        fold_fill.setAlpha(150)
+        painter.setBrush(fold_fill)
+        painter.setPen(QPen(outline, 1))
+        painter.drawPolygon(fold)
+        label_rect = QRect(rect.left() + 5, rect.top() + 4, min(46, max(32, rect.width() - 14)), 16)
+        label_fill = QColor("#1f2430")
+        label_fill.setAlpha(220)
+        painter.setBrush(label_fill)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(label_rect, 4, 4)
+        painter.setPen(QColor("#fff2a8"))
+        painter.setFont(QFont("Yu Gothic UI", 7, QFont.Bold))
+        painter.drawText(label_rect, Qt.AlignCenter, painter.fontMetrics().elidedText(map_note_title(note), Qt.ElideRight, label_rect.width() - 6))
+        text_back = QRect(rect.left() + 5, rect.top() + 23, max(20, rect.width() - 10), max(12, rect.height() - 28))
+        preview_back = QColor("#fff7c2")
+        preview_back.setAlpha(90)
+        painter.setBrush(preview_back)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(text_back, 3, 3)
+        painter.setPen(QColor("#3a2a08"))
+        painter.setFont(QFont("Yu Gothic UI", 8, QFont.Bold))
+        preview = map_note_title(note)
+        painter.drawText(rect.adjusted(7, 24, -7, -6), Qt.AlignTop | Qt.AlignLeft | Qt.TextWordWrap, preview[:32])
+        painter.restore()
 
     def draw_pallet(self, painter: QPainter, pallet: PalletRecord, rect: QRect, stack_index: int = 0, stack_count: int = 1) -> None:
         multi_selected = pallet.pallet_number in self.selected_pallets
@@ -2698,7 +2897,7 @@ class TopMapWidget(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing); painter.fillRect(self.rect(), QColor("#07111f"))
-        self.location_rects.clear(); self.pallet_rects.clear(); bounds = self.scaled_bounds(); columns, rows = self.draw_grid(painter, bounds)
+        self.location_rects.clear(); self.pallet_rects.clear(); self.note_rects.clear(); bounds = self.scaled_bounds(); columns, rows = self.draw_grid(painter, bounds)
         self.draw_entry_waiting_area(painter, bounds)
         entrance_rect = QRect(bounds.center().x() - 80, bounds.bottom() - 28, 160, 18)
         painter.setPen(QPen(QColor("#4fc3ff"), 2))
@@ -2742,6 +2941,15 @@ class TopMapWidget(QWidget):
             if self.dragging_pallet == pallet.pallet_number:
                 rect.moveTo(self.drag_point - self.drag_offset)
             self.pallet_rects[pallet.pallet_number] = rect; self.draw_pallet(painter, pallet, rect, stack_index=stack_index, stack_count=group_counts.get(group_key, 1))
+        for note in sorted(self.store.map_notes, key=lambda item: item.updated_at):
+            width_mm, depth_mm = footprint_mm_for_size(note.size)
+            base_point = self.point_from_note(note)
+            scale = self.draw_scale(bounds)
+            rect = QRect(base_point.x() - int(width_mm * scale / 2), base_point.y() - int(depth_mm * scale / 2), max(18, int(width_mm * scale)), max(14, int(depth_mm * scale)))
+            if self.dragging_note == note.note_id:
+                rect.moveTo(self.drag_point - self.drag_offset)
+            self.note_rects[note.note_id] = rect
+            self.draw_note(painter, note, rect)
         if self.dragging_pallet and self.drag_preview_location:
             label_text = visible_location_code(self.drag_preview_location)
             metrics = painter.fontMetrics()
@@ -2764,10 +2972,20 @@ class TopMapWidget(QWidget):
     def mousePressEvent(self, event) -> None:
         point = event.position().toPoint()
         if event.button() == Qt.RightButton:
+            for note_id, rect in self.note_rects.items():
+                if rect.contains(point):
+                    self.selected_note = note_id
+                    self.selected_pallet = None
+                    self.selected_pallets = set()
+                    self.mapNoteSelected.emit(note_id)
+                    self.mapNoteContextRequested.emit(note_id, event.globalPosition().toPoint())
+                    self.update()
+                    return
             for pallet_number, rect in self.pallet_rects.items():
                 if rect.contains(point):
                     self.selected_pallet = pallet_number
                     self.selected_pallets = {pallet_number}
+                    self.selected_note = None
                     self.palletSelected.emit(pallet_number)
                     self.palletContextRequested.emit(pallet_number, event.globalPosition().toPoint())
                     self.update()
@@ -2785,6 +3003,7 @@ class TopMapWidget(QWidget):
             return
         self.selected_pallet = None
         self.selected_pallets = set()
+        self.selected_note = None
         self.selectionCleared.emit()
         if self.zoom > 1.0:
             self.panning = True
@@ -2810,20 +3029,48 @@ class TopMapWidget(QWidget):
         if event.button() != Qt.LeftButton:
             return
         point = event.position().toPoint()
+        for note_id, rect in self.note_rects.items():
+            if rect.contains(point):
+                self.selected_note = note_id
+                self.selected_pallet = None
+                self.selected_pallets = set()
+                self.mapNoteSelected.emit(note_id)
+                self.mapNoteDoubleClicked.emit(note_id)
+                self.update()
+                return
         for pallet_number, rect in self.pallet_rects.items():
             if rect.contains(point):
                 self.selected_pallet = pallet_number
                 self.selected_pallets = {pallet_number}
+                self.selected_note = None
                 self.palletSelected.emit(pallet_number)
                 self.palletDoubleClicked.emit(pallet_number)
                 self.update()
                 return
 
     def begin_drag_at(self, point: QPoint) -> bool:
+        for note_id, rect in self.note_rects.items():
+            if rect.contains(point):
+                self.selected_note = note_id
+                self.selected_pallet = None
+                self.selected_pallets = set()
+                self.dragging_note = note_id
+                self.is_dragging = True
+                self.drag_start_point = point
+                self.drag_offset = point - rect.topLeft()
+                self.drag_point = point
+                self.drag_preview_location = None
+                self.setToolTip("")
+                QToolTip.hideText()
+                self.mapNoteSelected.emit(note_id)
+                self.dragStarted.emit()
+                self.update()
+                return True
         for pallet_number, rect in self.pallet_rects.items():
             if rect.contains(point):
                 self.selected_pallet = pallet_number
                 self.selected_pallets = {pallet_number}
+                self.selected_note = None
                 self.dragging_pallet = pallet_number
                 self.is_dragging = True
                 self.drag_start_point = point
@@ -2840,6 +3087,13 @@ class TopMapWidget(QWidget):
 
     def update_drag_at(self, point: QPoint) -> None:
         self.drag_point = point
+        if self.is_dragging and self.dragging_note:
+            self.hover_pallet = None
+            self.setToolTip("")
+            QToolTip.hideText()
+            self.setCursor(Qt.ArrowCursor)
+            self.update()
+            return
         if self.is_dragging and self.dragging_pallet:
             preview_location = self.nearest_location(point)
             self.drag_preview_location = normalize_location_code(preview_location) if preview_location else None
@@ -2850,24 +3104,35 @@ class TopMapWidget(QWidget):
             self.update()
             return
         hit = None
+        note_hit = None
+        for note_id, rect in self.note_rects.items():
+            if rect.contains(point):
+                note_hit = note_id
+                break
         for pallet_number, rect in self.pallet_rects.items():
             if rect.contains(point):
                 hit = pallet_number
                 break
         self.hover_pallet = hit
-        pallet = self.store.get_pallet(hit) if hit else None
-        if pallet:
+        note = self.store.get_map_note(note_hit) if note_hit else None
+        pallet = self.store.get_pallet(hit) if hit and note is None else None
+        if note:
+            text = map_note_popup_text(note)
+            self.setToolTip(text)
+            QToolTip.showText(self.mapToGlobal(point), text, self)
+        elif pallet:
             text = self.tooltip_text(pallet)
             self.setToolTip(text)
             QToolTip.showText(self.mapToGlobal(point), text, self)
         else:
             self.setToolTip("")
             QToolTip.hideText()
-        self.setCursor(Qt.PointingHandCursor if hit and not self.dragging_pallet else Qt.ArrowCursor)
+        self.setCursor(Qt.PointingHandCursor if (hit or note_hit) and not self.dragging_pallet and not self.dragging_note else Qt.ArrowCursor)
         self.update()
 
     def finish_drag_state(self, pallet_number: Optional[str], show_detail: bool = False) -> None:
         self.dragging_pallet = None
+        self.dragging_note = None
         self.drag_preview_location = None
         self.is_dragging = False
         self.setToolTip("")
@@ -2875,12 +3140,34 @@ class TopMapWidget(QWidget):
         if pallet_number:
             self.selected_pallet = pallet_number
             self.selected_pallets = {pallet_number}
+            self.selected_note = None
             self.hover_pallet = pallet_number
             if show_detail:
                 QTimer.singleShot(0, lambda pn=pallet_number: self.palletSelected.emit(pn))
         self.update()
 
     def end_drag_at(self, point: QPoint) -> None:
+        if self.dragging_note:
+            dragged_note = self.dragging_note
+            moved = (point - self.drag_start_point).manhattanLength()
+            if moved <= 6:
+                QTimer.singleShot(0, lambda nid=dragged_note: self.mapNoteSelected.emit(nid))
+            else:
+                note = self.store.get_map_note(dragged_note)
+                if note is not None:
+                    center = point - self.drag_offset + QPoint(self.note_rects.get(dragged_note, QRect()).width() // 2, self.note_rects.get(dragged_note, QRect()).height() // 2)
+                    destination = self.nearest_location(center)
+                    if destination:
+                        col, row = location_to_grid(destination)
+                        map_x, map_y = self.clamped_normalized_for_note(note, (col + 0.5) / GRID_COLUMNS, (row + 0.5) / GRID_ROWS)
+                    else:
+                        bounds = self.scaled_bounds()
+                        map_x = 0.5 if bounds.width() <= 0 else (center.x() - bounds.left()) / bounds.width()
+                        map_y = 0.5 if bounds.height() <= 0 else (center.y() - bounds.top()) / bounds.height()
+                        map_x, map_y = self.clamped_normalized_for_note(note, map_x, map_y)
+                    self.mapNoteMoved.emit(dragged_note, map_x, map_y)
+            self.finish_drag_state(None, show_detail=False)
+            return
         if not self.dragging_pallet:
             return
         dragged_pallet = self.dragging_pallet
@@ -2902,6 +3189,7 @@ class TopMapWidget(QWidget):
                 self.touch_zoom_distance = None
                 self.touch_zoom_midpoint = None
                 self.is_dragging = False
+                self.dragging_note = None
                 return True
             if event.type() == QEvent.TouchEnd:
                 if self.touch_zoom_distance is not None:
@@ -3333,7 +3621,7 @@ class MainWindow(QMainWindow):
     INVENTORY_PALLET_COLUMN = 8
 
     def __init__(self) -> None:
-        super().__init__(); self.store = load_store(); self.current_pallet_number = None
+        super().__init__(); self.store = load_store(); self.current_pallet_number = None; self.current_note_id = None
         self.inventory_sort_key = "part_code"
         self.inventory_sort_desc = False
         self.settings = QSettings(APP_ID, "WarehouseApp")
@@ -3373,6 +3661,7 @@ class MainWindow(QMainWindow):
         self.title_label = QLabel("大阪工場倉庫"); self.title_label.setStyleSheet("font:700 18px 'Yu Gothic UI', 'Segoe UI'; color:#7fd0ff;")
         self.summary_label = QLabel(); self.summary_label.setStyleSheet("color:#89a4c2;"); self.summary_label.setWordWrap(True)
         self.new_button = QPushButton("新規登録"); self.new_button.clicked.connect(self.open_registration)
+        self.add_note_button = QPushButton("メモ追加"); self.add_note_button.clicked.connect(self.open_map_note_dialog)
         self.help_button = QPushButton("ヘルプ"); self.help_button.clicked.connect(self.open_help_tab)
         self.blocked_mode_button = QPushButton("置けないマス設定"); self.blocked_mode_button.setCheckable(True); self.blocked_mode_button.toggled.connect(self.set_blocked_edit_mode)
         self.edit_button = QPushButton("明細編集"); self.edit_button.clicked.connect(self.edit_selected_pallet)
@@ -3391,14 +3680,14 @@ class MainWindow(QMainWindow):
         self.export_button = QPushButton("Export"); self.export_button.clicked.connect(self.export_data)
         self.import_button = QPushButton("Import"); self.import_button.clicked.connect(self.import_data)
         self.clear_selection_button = QPushButton("選択解除"); self.clear_selection_button.clicked.connect(self.clear_selection)
-        self.action_buttons = [self.new_button, self.help_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_up_button, self.stack_down_button, self.rotate_button, self.export_button, self.import_button]
+        self.action_buttons = [self.new_button, self.add_note_button, self.help_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_up_button, self.stack_down_button, self.rotate_button, self.export_button, self.import_button]
         for button in self.action_buttons: button.setMinimumHeight(40)
         self.search_input.setMinimumHeight(40)
         self.copy_inventory_button.setMinimumHeight(40)
         self.inventory_columns_button.setMinimumHeight(40)
         title_row = QHBoxLayout(); title_row.addWidget(self.title_label); title_row.addWidget(self.summary_label, 1)
         action_row = QHBoxLayout()
-        for widget in [self.new_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_down_button, self.stack_up_button, self.rotate_button]:
+        for widget in [self.new_button, self.add_note_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_down_button, self.stack_up_button, self.rotate_button]:
             action_row.addWidget(widget)
         action_row.addStretch(1)
         action_row.addWidget(self.export_button)
@@ -3444,7 +3733,7 @@ class MainWindow(QMainWindow):
         resize_row.addStretch(1)
         resize_row.addWidget(self.detail_resize_handle)
         detail_root.addLayout(resize_row)
-        self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.set_blocked_location_with_validation); self.top_map.palletContextRequested.connect(self.open_pallet_context_menu); self.top_map.dragStarted.connect(self.hide_detail_for_drag); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
+        self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.set_blocked_location_with_validation); self.top_map.palletContextRequested.connect(self.open_pallet_context_menu); self.top_map.mapNoteSelected.connect(self.select_map_note); self.top_map.mapNoteDoubleClicked.connect(self.open_map_note_editor); self.top_map.mapNoteMoved.connect(self.move_map_note); self.top_map.mapNoteContextRequested.connect(self.open_map_note_context_menu); self.top_map.dragStarted.connect(self.hide_detail_for_drag); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
         self.iso_map = IsometricMapWidget(self.store); self.iso_map.palletSelected.connect(self.select_pallet); self.iso_map.selectionCleared.connect(self.clear_selection); self.iso_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.iso_map.palletContextRequested.connect(self.open_pallet_context_menu)
         self.iso_rotate_button = QPushButton("視点90°")
         self.iso_rotate_button.setParent(self.iso_map)
@@ -3584,19 +3873,19 @@ class MainWindow(QMainWindow):
                 </div>
                 """,
             ),
-            ("基本操作", "1. 新規登録でパレット番号・入庫日・明細を入力\n2. 明細を追加してから OK で登録\n3. 登録直後は仮置きエリア（未配置）に入るため、真上ビューで保管場所へドラッグ移動"),
-            ("仮置きエリア（未配置）", "新規登録・出庫復元・列解除・積み替えで作成した空パレットは仮置きエリアへ入ります。\n上限は10個です。上限に達した場合は、先に仮置きエリア内のパレットを倉庫内へ配置してください。\n仮置き中のパレットは、パレット数・明細数・総枚数・面積使用率にカウントしません。"),
-            ("位置変更", "真上ビューでパレットをドラッグ、またはタブレットでスワイプして移動します。\n2本指ピンチで拡大縮小できます。\nある程度グリッドに吸着しますが、細かい位置調整もできます。\nパレットのない場所をクリックすると選択解除できます。\nパレットを右クリックすると、編集・向き変更・段操作・列解除・積み替え・出庫のメニューを表示できます。"),
+            ("基本操作", "1. 新規登録でパレット番号・入庫日・明細を入力\n2. 明細を追加してから OK で登録\n3. 登録直後は仮置きエリア（未配置）に入るため、真上ビューで保管場所へドラッグ移動\n4. 地図上の注釈はメモ追加から登録できます。メモは在庫ではなく地図メモとして扱います。"),
+            ("仮置きエリア（未配置）", "新規登録・メモ追加・出庫復元・列解除・積み替えで作成した空パレットは仮置きエリアへ入ります。\n上限は10個です。上限に達した場合は、先に仮置きエリア内のパレットやメモを倉庫内へ配置してください。\n仮置き中のパレットは、パレット数・明細数・総枚数・面積使用率にカウントしません。"),
+            ("位置変更", "真上ビューでパレットやメモをドラッグ、またはタブレットでスワイプして移動します。\n2本指ピンチで拡大縮小できます。\nある程度グリッドに吸着しますが、細かい位置調整もできます。\nパレットやメモのない場所をクリックすると選択解除できます。\nパレットを右クリックすると、編集・向き変更・段操作・列解除・積み替え・出庫のメニューを表示できます。\nメモを右クリックすると撤去できます。"),
             ("積み重ね", "1ロケーション = 1スタック列です。同じマスに置いたパレットだけが同じ列として扱われます。\n隣マスや上下左右の別マスに置いた場合は積み重なりません。\n段を上げる / 下げるで同じ列の上下順を入れ替えます。\n列を解除は、選択中のパレットを1枚だけ外して仮置きエリア（未配置）へ移動します。"),
-            ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n面積使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、面積使用率では1パレット列分としてカウントします。"),
+            ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n面積使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、面積使用率では1パレット列分としてカウントします。\nメモは在庫ではないため、パレット数・明細数・総枚数・高さ・出庫履歴には含めません。"),
             ("置けないマス設定", "置けないマス設定を押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
-            ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\nパレット番号・入庫日・色・向き・明細の追加/削除/順番変更ができます。\n厚みと枚数は行内の +/- で調整できます。厚みが 3-3.5 のような範囲入力でも、+/- を使うと最大値基準の単一値へ切り替えて調整します。"),
+            ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\nパレット番号・入庫日・色・向き・明細の追加/削除/順番変更ができます。\nメモを選択している場合は、同じボタンがメモ編集になり、本文・サイズ・色を変更できます。\n厚みと枚数は行内の +/- で調整できます。厚みが 3-3.5 のような範囲入力でも、+/- を使うと最大値基準の単一値へ切り替えて調整します。"),
             ("積み替え", "積み替えでは、選択中パレットの一部枚数を既存パレットまたは空パレットへ移動できます。\n同じ明細でも自動では合算しません。\n空パレットを作る場合は仮置きエリア（未配置）に作成されます。"),
-            ("出庫と復元", "出庫したパレットは真上ビューと在庫一覧から外れ、出庫一覧へ移ります。\n出庫履歴はボタンまたは出庫一覧の右クリックメニューから削除・復元できます。\n復元すると元位置ではなく仮置きエリア（未配置）へ置かれます。"),
+            ("出庫と復元", "出庫したパレットは真上ビューと在庫一覧から外れ、出庫一覧へ移ります。\n出庫履歴はボタンまたは出庫一覧の右クリックメニューから削除・復元できます。\n復元すると元位置ではなく仮置きエリア（未配置）へ置かれます。\nメモは出庫ではなく撤去扱いのため、出庫履歴には入りません。"),
             ("45度ビュー", "45度ビューは立体確認用です。パレット移動は真上ビューで行います。\n視点90°で向きを切り替え、ドラッグまたはタブレットの1本指操作で表示位置を動かせます。\n2本指ピンチで拡大縮小できます。\n積み重ねは真上に積まれた状態で表示します。"),
             ("在庫一覧", "在庫一覧では列ヘッダーをクリックして並び替えできます。\n検索はスペース区切り AND 検索です。例: 39 LL 10 A\n行をダブルクリックすると真上ビューへ切り替わり、該当パレットを強調表示します。まとめ行に複数パレットが含まれる場合は、該当パレットをまとめて強調表示します。\n一覧コピーでExcelへ貼り付けでき、棚卸データ出力では同じ品番・サイズ・厚み・加工・グレードを合計します。"),
             ("色の見方", "自動判別は明細内容で色を決めます。\nC/Cのみは紫、#38は赤、#39は青、#45は緑、#50は桃、#40は黄、混在やその他はグレーです。\n新規登録・編集では自動判別と手動指定を切り替えられます。"),
-            ("保存と共有", "編集確定・登録確定・移動完了・積み替え確定・出庫確定など、データ変更が確定した時に保存します。\n保存に失敗した場合は再試行または別名保存を選べます。\n日次バックアップは backups フォルダへ自動保存されます。ファイル名は inventory-data-YYYY-MM-DD.json 形式で、同じ日は1回だけ作成し、その日最初に保存する前の状態を残します。\nデータ共有は Export / Import を使います。Import は現在データを上書きするため確認が出ます。"),
+            ("保存と共有", "編集確定・登録確定・メモ追加・メモ編集・移動完了・積み替え確定・出庫確定など、データ変更が確定した時に保存します。\n保存に失敗した場合は再試行または別名保存を選べます。\n日次バックアップは backups フォルダへ自動保存されます。ファイル名は inventory-data-YYYY-MM-DD.json 形式で、同じ日は1回だけ作成し、その日最初に保存する前の状態を残します。\nデータ共有は Export / Import を使います。Import は現在データを上書きするため確認が出ます。"),
             ("困った時", "位置や段順が変に見える場合は、まず真上ビューでロケーションと積み段を確認してください。\nデータ読込エラーや保存エラーは store-error.log に記録されます。\n本体とバックアップの両方が読めない場合は、復旧ダイアログを表示して起動を停止します。"),
         ]
 
@@ -3654,6 +3943,18 @@ class MainWindow(QMainWindow):
     def update_stack_detail_style(self) -> None:
         compact = self.width() < 1180
         narrow = self.width() < 980
+        current_note = self.store.get_map_note(self.current_note_id or "") if hasattr(self, "store") else None
+        if current_note is not None:
+            color = QColor(COLOR_PRESETS.get(current_note.color_key, COLOR_PRESETS["YELLOW"])[1] or "#FFC34D")
+            border_color = color.name()
+            soft = QColor(color)
+            soft.setAlpha(68)
+            self.detail_frame.setStyleSheet(f"background:{soft.name(QColor.HexArgb)}; border:2px solid {border_color}; border-radius:8px;")
+            self.stack_detail_selector.setVisible(False)
+            self.stack_detail_pages.setStyleSheet(
+                f"QLabel {{ background:transparent; color:#fff7d6; font:{'10pt' if narrow else ('11pt' if compact else '11.5pt')} 'Yu Gothic UI', 'Segoe UI'; }}"
+            )
+            return
         current_pallet = self.current_stack_detail_pallet()
         color = pallet_color(current_pallet) if isinstance(current_pallet, PalletRecord) else QColor("#f0c860")
         border_color = color.name()
@@ -3705,7 +4006,9 @@ class MainWindow(QMainWindow):
         current_pallet = self.current_stack_detail_pallet()
         if current_pallet is not None:
             self.current_pallet_number = current_pallet.pallet_number
+            self.current_note_id = None
             self.top_map.selected_pallet = current_pallet.pallet_number
+            self.top_map.selected_note = None
             self.iso_map.selected_pallet = current_pallet.pallet_number
             self.top_map.update()
             self.iso_map.update()
@@ -3793,6 +4096,9 @@ class MainWindow(QMainWindow):
                     watched.add(current_scroll)
                     watched.add(current_scroll.viewport())
             if source in watched:
+                if self.current_note_id and self.store.get_map_note(self.current_note_id) is not None:
+                    self.open_map_note_editor(self.current_note_id)
+                    return True
                 pallet = self.current_stack_detail_pallet()
                 if pallet is not None:
                     self.open_selected_pallet_editor(pallet.pallet_number)
@@ -3809,9 +4115,10 @@ class MainWindow(QMainWindow):
         self.summary_label.setStyleSheet(f"color:#89a4c2; font:{'10pt' if compact else '11pt'} 'Yu Gothic UI', 'Segoe UI';")
         text_map = {
             self.new_button: "新規" if compact else "新規登録",
+            self.add_note_button: "メモ" if compact else "メモ追加",
             self.help_button: "ヘルプ",
             self.blocked_mode_button: "禁止マス" if compact else "置けないマス設定",
-            self.edit_button: "編集" if compact else "明細編集",
+            self.edit_button: ("メモ" if compact else "メモ編集") if self.current_note_id else ("編集" if compact else "明細編集"),
             self.ship_button: "出庫",
             self.transfer_button: "積替" if compact else "積み替え",
             self.unstack_button: "解除" if compact else "列を解除",
@@ -3845,15 +4152,20 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "detail_frame") or not hasattr(self, "map_container") or not hasattr(self, "stack_detail_pages"):
             return
         current_pallet = self.store.get_pallet(self.current_pallet_number or "") if hasattr(self, "store") else None
-        if current_pallet is None:
+        current_note = self.store.get_map_note(self.current_note_id or "") if hasattr(self, "store") else None
+        if current_pallet is None and current_note is None:
             self.detail_frame.hide()
             return
         active_widget = self.active_map_widget()
         if active_widget is None:
             self.detail_frame.hide()
             return
-        rect_map = getattr(active_widget, "pallet_rects", {})
-        anchor_rect = rect_map.get(current_pallet.pallet_number)
+        if current_note is not None:
+            rect_map = getattr(active_widget, "note_rects", {})
+            anchor_rect = rect_map.get(current_note.note_id)
+        else:
+            rect_map = getattr(active_widget, "pallet_rects", {})
+            anchor_rect = rect_map.get(current_pallet.pallet_number)
         if anchor_rect is None:
             self.detail_frame.hide()
             return
@@ -4591,8 +4903,10 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(0)
         primary = self.current_pallet_number if self.current_pallet_number in valid_numbers else valid_numbers[0]
         self.current_pallet_number = None
+        self.current_note_id = None
         self.top_map.selected_pallet = primary
         self.top_map.selected_pallets = set(valid_numbers)
+        self.top_map.selected_note = None
         self.top_map.hover_pallet = primary
         self.iso_map.selected_pallet = None
         if len(valid_numbers) > 1:
@@ -4634,7 +4948,24 @@ class MainWindow(QMainWindow):
         if self.current_pallet_number != pallet_number:
             self.detail_frame_manual_position = None
         self.current_pallet_number = pallet_number
-        self.top_map.selected_pallet = pallet_number; self.top_map.selected_pallets = {pallet_number}; self.iso_map.selected_pallet = pallet_number; self.top_map.update(); self.iso_map.update(); self.refresh_detail()
+        self.current_note_id = None
+        self.top_map.selected_pallet = pallet_number; self.top_map.selected_pallets = {pallet_number}; self.top_map.selected_note = None; self.iso_map.selected_pallet = pallet_number; self.apply_responsive_layout(); self.top_map.update(); self.iso_map.update(); self.refresh_detail()
+
+    def select_map_note(self, note_id: str) -> None:
+        if self.current_note_id != note_id:
+            self.detail_frame_manual_position = None
+        if self.store.get_map_note(note_id) is None:
+            return
+        self.current_note_id = note_id
+        self.current_pallet_number = None
+        self.top_map.selected_note = note_id
+        self.top_map.selected_pallet = None
+        self.top_map.selected_pallets = set()
+        self.iso_map.selected_pallet = None
+        self.apply_responsive_layout()
+        self.top_map.update()
+        self.iso_map.update()
+        self.refresh_detail()
 
     def open_pallet_context_menu(self, pallet_number: str, global_pos: QPoint) -> None:
         pallet = self.store.get_pallet(pallet_number)
@@ -4675,6 +5006,43 @@ class MainWindow(QMainWindow):
             self.ship_selected_pallet()
 
     def refresh_detail(self) -> None:
+        note = self.store.get_map_note(self.current_note_id or "")
+        if note is not None:
+            self.stack_detail_selector.blockSignals(True)
+            self.stack_detail_selector.clear()
+            while self.stack_detail_pages.count():
+                page = self.stack_detail_pages.widget(0)
+                self.stack_detail_pages.removeWidget(page)
+                page.deleteLater()
+            page = QWidget()
+            page.setProperty("note_id", note.note_id)
+            page.installEventFilter(self)
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.installEventFilter(self)
+            scroll.viewport().installEventFilter(self)
+            inner = QWidget()
+            inner_layout = QVBoxLayout(inner)
+            inner_layout.setContentsMargins(4, 4, 6, 4)
+            detail_label = QLabel(map_note_popup_text(note))
+            detail_label.setWordWrap(True)
+            detail_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+            detail_label.installEventFilter(self)
+            inner_layout.addWidget(detail_label)
+            inner_layout.addStretch(1)
+            scroll.setWidget(inner)
+            page_layout.addWidget(scroll)
+            self.stack_detail_pages.addWidget(page)
+            self.stack_detail_selector.setVisible(False)
+            self.stack_detail_selector.blockSignals(False)
+            self.update_stack_detail_style()
+            self.update_detail_overlay_geometry()
+            self.detail_frame.show()
+            return
         pallet = self.store.get_pallet(self.current_pallet_number or "")
         if not pallet:
             self.detail_frame.hide()
@@ -4807,6 +5175,13 @@ class MainWindow(QMainWindow):
             map_y = pallet.map_y if pallet.map_y is not None else ENTRY_MAP_Y
             if abs(map_x - slot_x) <= ENTRY_WAITING_TOLERANCE and abs(map_y - slot_y) <= ENTRY_WAITING_TOLERANCE:
                 return True
+        for note in self.store.map_notes:
+            if note.note_id == ignore or (note.map_y or 0.0) <= 1.0:
+                continue
+            map_x = note.map_x if note.map_x is not None else ENTRY_MAP_X
+            map_y = note.map_y if note.map_y is not None else ENTRY_MAP_Y
+            if abs(map_x - slot_x) <= ENTRY_WAITING_TOLERANCE and abs(map_y - slot_y) <= ENTRY_WAITING_TOLERANCE:
+                return True
         return False
 
     def find_entry_waiting_placement(self, pallet: PalletRecord) -> Tuple[str, float, float]:
@@ -4818,6 +5193,89 @@ class MainWindow(QMainWindow):
             candidate_x, candidate_y = self.top_map.clamped_normalized_for_pallet(pallet, slot_x, slot_y)
             return ENTRY_LOCATION, candidate_x, candidate_y
         raise ValueError(self.entry_waiting_full_message())
+
+    def find_map_note_waiting_placement(self, note: MapNoteRecord) -> Tuple[float, float]:
+        for slot_x, slot_y in ENTRY_WAITING_SLOTS:
+            if self.entry_waiting_slot_occupied(slot_x, slot_y, ignore=note.note_id):
+                continue
+            return self.top_map.clamped_normalized_for_note(note, slot_x, slot_y)
+        raise ValueError("仮置きエリア（未配置）に空きがありません。\n先に仮置きエリア内のメモまたはパレットを配置してください。")
+
+    def open_map_note_dialog(self) -> None:
+        dialog = MapNoteDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        payload = dialog.payload()
+        if payload is None:
+            return
+        text, size, color_key = payload
+        note = MapNoteRecord(text=text, size=size, color_key=color_key, map_x=ENTRY_MAP_X, map_y=ENTRY_MAP_Y, updated_at=now_text())
+        try:
+            note.map_x, note.map_y = self.find_map_note_waiting_placement(note)
+        except ValueError as exc:
+            QMessageBox.warning(self, "メモ追加", str(exc))
+            return
+        self.store.map_notes.append(note)
+        self.select_map_note(note.note_id)
+        self.mark_store_dirty()
+        self.refresh_all()
+
+    def move_map_note(self, note_id: str, map_x: float, map_y: float) -> None:
+        note = self.store.get_map_note(note_id)
+        if note is None:
+            return
+        note.map_x, note.map_y = self.top_map.clamped_normalized_for_note(note, map_x, map_y)
+        note.updated_at = now_text()
+        self.current_note_id = note_id
+        self.current_pallet_number = None
+        self.mark_store_dirty()
+        self.refresh_all()
+
+    def open_map_note_editor(self, note_id: str) -> None:
+        note = self.store.get_map_note(note_id)
+        if note is None:
+            return
+        dialog = MapNoteDialog(self, note)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        payload = dialog.payload()
+        if payload is None:
+            return
+        text, size, color_key = payload
+        note.text = text
+        note.size = size
+        note.color_key = color_key
+        note.updated_at = now_text()
+        self.select_map_note(note.note_id)
+        self.mark_store_dirty()
+        self.refresh_all()
+
+    def open_map_note_context_menu(self, note_id: str, global_pos: QPoint) -> None:
+        note = self.store.get_map_note(note_id)
+        if note is None:
+            return
+        menu = QMenu(self)
+        remove_action = menu.addAction("撤去")
+        selected_action = menu.exec(global_pos)
+        if selected_action == remove_action:
+            self.remove_map_note(note_id)
+
+    def remove_map_note(self, note_id: str) -> None:
+        note = self.store.get_map_note(note_id)
+        if note is None:
+            return
+        preview = note.text.strip().splitlines()[0] if note.text.strip() else "メモ"
+        if len(preview) > 40:
+            preview = preview[:40] + "..."
+        if QMessageBox.question(self, "メモ撤去", f"メモ「{preview}」を撤去しますか？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        self.store.map_notes = [item for item in self.store.map_notes if item.note_id != note_id]
+        if self.current_note_id == note_id:
+            self.current_note_id = None
+            self.top_map.selected_note = None
+            self.apply_responsive_layout()
+        self.mark_store_dirty()
+        self.refresh_all()
 
     def move_pallet(self, pallet_number: str, map_x: float, map_y: float, destination: str) -> None:
         pallet = self.store.get_pallet(pallet_number)
@@ -4915,6 +5373,9 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "列を解除", "解除したパレットは仮置きエリア（未配置）へ移動しました。")
 
     def edit_selected_pallet(self) -> None:
+        if self.current_note_id and self.store.get_map_note(self.current_note_id) is not None:
+            self.open_map_note_editor(self.current_note_id)
+            return
         pallet = self.store.get_pallet(self.current_pallet_number or "")
         if not pallet:
             QMessageBox.information(self, "編集", "先にパレットを選択してください。")
@@ -5076,10 +5537,10 @@ class MainWindow(QMainWindow):
             log_store_error(f"import failed: {import_path}\n{traceback.format_exc()}")
             QMessageBox.warning(self, "Import", f"読み込みに失敗しました。現在のデータは変更していません。\n{file_path}")
             return
-        self.store = imported_store; self.top_map.store = self.store; self.iso_map.store = self.store; self.current_pallet_number = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.mark_store_dirty(immediate=True); self.refresh_all(); QMessageBox.information(self, "Import", f"読み込みました。\n{file_path}")
+        self.store = imported_store; self.top_map.store = self.store; self.iso_map.store = self.store; self.current_pallet_number = None; self.current_note_id = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.mark_store_dirty(immediate=True); self.refresh_all(); QMessageBox.information(self, "Import", f"読み込みました。\n{file_path}")
 
     def clear_selection(self) -> None:
-        self.current_pallet_number = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.top_map.update(); self.iso_map.update(); self.refresh_detail()
+        self.current_pallet_number = None; self.current_note_id = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.apply_responsive_layout(); self.top_map.update(); self.iso_map.update(); self.refresh_detail()
 
     def current_zoom_widget(self) -> Optional[QWidget]:
         current = self.tabs.currentWidget()
