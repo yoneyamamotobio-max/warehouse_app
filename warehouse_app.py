@@ -28,8 +28,18 @@ ICON_PATH = APP_DIR / "icon.ico"
 STORE_LOG_PATH = APP_DIR / "store-error.log"
 APP_ID = "Yone.WarehouseApp"
 DAILY_BACKUP_RETENTION_DAYS = 90
-GRID_COLUMNS = 16
-GRID_ROWS = 20
+GRID_COLUMNS = 12
+GRID_ROWS = 23
+AISLE_COLUMN_LABELS = {"B", "E", "F", "J"}
+TOP_VIEW_MARGIN_LEFT = 72
+TOP_VIEW_MARGIN_TOP = 54
+TOP_VIEW_MARGIN_RIGHT = 94
+TOP_VIEW_MARGIN_BOTTOM = 42
+TOP_VIEW_SCROLL_PADDING = 140
+TOP_VIEW_STACK_OFFSET_X = 10
+TOP_VIEW_STACK_OFFSET_Y = 8
+TOP_VIEW_SELECTED_STACK_OFFSET_X = 28
+TOP_VIEW_SELECTED_STACK_OFFSET_Y = 22
 COLOR_PRESETS = {
     "AUTO": ("自動", None),
     "BLUE": ("青", "#57C1FF"),
@@ -87,6 +97,17 @@ def column_label(index: int) -> str:
         index, remainder = divmod(index - 1, 26)
         text = chr(65 + remainder) + text
     return text
+
+
+def is_aisle_column(index: int) -> bool:
+    return column_label(index) in AISLE_COLUMN_LABELS
+
+
+def grid_column_display_label(index: int) -> str:
+    label = column_label(index)
+    if label in AISLE_COLUMN_LABELS:
+        return f"{label}(通路)"
+    return label
 
 
 DEFAULT_LOCATIONS = [f"{column_label(col)}{row}" for row in range(1, GRID_ROWS + 1) for col in range(GRID_COLUMNS)]
@@ -2564,6 +2585,8 @@ class TopMapWidget(QWidget):
     def __init__(self, store: InventoryStore, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.store = store; self.selected_pallet = None; self.hover_pallet = None; self.selected_note = None
+        self.hover_note = None
+        self.hover_target = None
         self.selected_pallets: set[str] = set()
         self.location_rects: Dict[str, QRect] = {}; self.pallet_rects: Dict[str, QRect] = {}; self.note_rects: Dict[str, QRect] = {}
         self.dragging_pallet = None; self.drag_offset = QPoint(); self.drag_point = QPoint(); self.zoom = 1.0
@@ -2571,6 +2594,16 @@ class TopMapWidget(QWidget):
         self.is_dragging = False
         self.drag_start_point = QPoint()
         self.drag_preview_location: Optional[str] = None
+        self.drag_update_pending = False
+        self.drag_update_rect: Optional[QRect] = None
+        self.drag_update_interval_ms = 16
+        self.base_cache_pixmap: Optional[QPixmap] = None
+        self.base_cache_key = None
+        self.base_cache_dirty = True
+        self.drag_cache_pixmap: Optional[QPixmap] = None
+        self.drag_cache_pallet: Optional[str] = None
+        self.drag_cache_note: Optional[str] = None
+        self.drag_pallet_draw_info: Optional[Tuple[int, int]] = None
         self.pan_offset = QPoint()
         self.panning = False
         self.pan_anchor = QPoint()
@@ -2585,11 +2618,12 @@ class TopMapWidget(QWidget):
 
     def toggle_attention_state(self) -> None:
         self.attention_visible = not self.attention_visible
-        self.update()
+        if self.selected_pallet or self.selected_pallets or self.selected_note:
+            self.update()
 
     def scaled_bounds(self) -> QRect:
-        bottom_margin = 72 if self.has_entry_waiting_pallets() and self.height() >= 520 else 18
-        base = self.rect().adjusted(18, 18, -18, -bottom_margin); center = base.center()
+        bottom_margin = 92 if self.has_entry_waiting_pallets() and self.height() >= 520 else TOP_VIEW_MARGIN_BOTTOM
+        base = self.rect().adjusted(TOP_VIEW_MARGIN_LEFT, TOP_VIEW_MARGIN_TOP, -TOP_VIEW_MARGIN_RIGHT, -bottom_margin); center = base.center()
         width = max(200, int(base.width() * self.zoom)); height = max(170, int(base.height() * self.zoom * 1.07))
         rect = QRect(center.x() - width // 2, center.y() - height // 2, width, height)
         rect.translate(self.pan_offset)
@@ -2603,9 +2637,9 @@ class TopMapWidget(QWidget):
         return QRect(available.left(), available.bottom() - 46, available.width(), 46)
 
     def clamp_pan(self) -> None:
-        base = self.rect().adjusted(18, 18, -18, -18)
-        max_x = max(0, (int(base.width() * self.zoom) - base.width()) // 2)
-        max_y = max(0, (int(base.height() * self.zoom * 1.07) - base.height()) // 2)
+        base = self.rect().adjusted(TOP_VIEW_MARGIN_LEFT, TOP_VIEW_MARGIN_TOP, -TOP_VIEW_MARGIN_RIGHT, -TOP_VIEW_MARGIN_BOTTOM)
+        max_x = TOP_VIEW_SCROLL_PADDING + max(0, (int(base.width() * self.zoom) - base.width()) // 2)
+        max_y = TOP_VIEW_SCROLL_PADDING + max(0, (int(base.height() * self.zoom * 1.07) - base.height()) // 2)
         self.pan_offset.setX(max(-max_x, min(max_x, self.pan_offset.x())))
         self.pan_offset.setY(max(-max_y, min(max_y, self.pan_offset.y())))
 
@@ -2635,18 +2669,32 @@ class TopMapWidget(QWidget):
         return QRect(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
 
     def draw_grid_labels(self, painter: QPainter, bounds: QRect, columns: int, rows: int) -> None:
-        painter.setPen(QColor("#3b6f9e"))
-        painter.setFont(QFont("Yu Gothic UI", 12, QFont.Bold))
+        painter.save()
         x_edges = self.grid_edges(bounds.left(), bounds.width(), columns)
         y_edges = self.grid_edges(bounds.top(), bounds.height(), rows)
         for i in range(columns):
             x = (x_edges[i] + x_edges[i + 1]) / 2
-            painter.drawText(QRect(int(x) - 20, bounds.top() - 22, 40, 18), Qt.AlignCenter, column_label(i))
+            label = grid_column_display_label(i)
+            aisle = is_aisle_column(i)
+            painter.setPen(QColor("#ffe066") if aisle else QColor("#3b6f9e"))
+            painter.setFont(QFont("Yu Gothic UI", 10 if aisle else 15, QFont.Bold))
+            for label_rect in (
+                QRect(int(x) - 42, bounds.top() - 30, 84, 24),
+                QRect(int(x) - 42, bounds.bottom() + 6, 84, 24),
+            ):
+                painter.fillRect(label_rect.adjusted(1, 1, -1, -1), QColor(7, 17, 31, 190))
+                painter.drawText(label_rect, Qt.AlignCenter, label)
         for i in range(rows):
             y = (y_edges[i] + y_edges[i + 1]) / 2
-            label_rect = QRect(bounds.right() + 4, int(y) - 9, 40, 18)
-            painter.fillRect(label_rect.adjusted(-1, 0, 0, 0), QColor(7, 17, 31, 215))
-            painter.drawText(label_rect, Qt.AlignVCenter | Qt.AlignLeft, f"{i + 1:02d}")
+            painter.setPen(QColor("#3b6f9e"))
+            painter.setFont(QFont("Yu Gothic UI", 13, QFont.Bold))
+            for label_rect, alignment in (
+                (QRect(bounds.left() - 48, int(y) - 10, 44, 20), Qt.AlignVCenter | Qt.AlignRight),
+                (QRect(bounds.right() + 4, int(y) - 10, 44, 20), Qt.AlignVCenter | Qt.AlignLeft),
+            ):
+                painter.fillRect(label_rect.adjusted(-1, 0, 0, 0), QColor(7, 17, 31, 215))
+                painter.drawText(label_rect, alignment, f"{i + 1:02d}")
+        painter.restore()
 
     def draw_entry_waiting_area(self, painter: QPainter, bounds: QRect) -> None:
         if not self.has_entry_waiting_pallets():
@@ -2695,6 +2743,7 @@ class TopMapWidget(QWidget):
         viewport_center = self.rect().center()
         self.pan_offset += viewport_center - target
         self.clamp_pan()
+        self.invalidate_base_cache()
         self.update()
 
     def draw_scale(self, bounds: QRect) -> float:
@@ -2711,8 +2760,8 @@ class TopMapWidget(QWidget):
         scale = self.draw_scale(bounds)
         half_w = (width_mm * scale) / 2.0
         half_h = (depth_mm * scale) / 2.0
-        shift_x = stack_index * 6
-        shift_y = stack_index * 5
+        shift_x = stack_index * TOP_VIEW_STACK_OFFSET_X
+        shift_y = stack_index * TOP_VIEW_STACK_OFFSET_Y
         min_x = (half_w - shift_x) / bounds.width()
         max_x = (bounds.width() - half_w - shift_x) / bounds.width()
         min_y = (half_h + shift_y) / bounds.height()
@@ -2895,8 +2944,37 @@ class TopMapWidget(QWidget):
             painter.setFont(QFont("Yu Gothic UI", 6, QFont.Bold))
             painter.drawText(move_badge, Qt.AlignCenter, "移動")
 
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing); painter.fillRect(self.rect(), QColor("#07111f"))
+    def cache_key(self):
+        return (
+            self.size().width(),
+            self.size().height(),
+            round(self.zoom, 4),
+            self.pan_offset.x(),
+            self.pan_offset.y(),
+            tuple(sorted(self.store.blocked_locations)),
+            tuple((p.pallet_number, p.location_code, p.stack_order, p.orientation, p.map_x, p.map_y, p.updated_at, p.color_key, len(p.items)) for p in self.store.pallets),
+            tuple((n.note_id, n.size, n.map_x, n.map_y, n.color_key, n.updated_at) for n in self.store.map_notes),
+        )
+
+    def invalidate_base_cache(self) -> None:
+        self.base_cache_pixmap = None
+        self.base_cache_key = None
+        self.base_cache_dirty = True
+        self.drag_cache_pixmap = None
+        self.drag_cache_pallet = None
+        self.drag_cache_note = None
+
+    def render_top_map(self, painter: QPainter, exclude_pallet: Optional[str] = None, exclude_note: Optional[str] = None, static_cache: bool = False) -> None:
+        saved_state = None
+        if static_cache:
+            saved_state = (self.selected_pallet, set(self.selected_pallets), self.selected_note, self.hover_pallet, self.hover_note, self.dragging_pallet, self.dragging_note, self.attention_visible)
+            self.hover_pallet = None
+            self.hover_note = None
+            self.dragging_pallet = None
+            self.dragging_note = None
+            self.attention_visible = False
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#07111f"))
         self.location_rects.clear(); self.pallet_rects.clear(); self.note_rects.clear(); bounds = self.scaled_bounds(); columns, rows = self.draw_grid(painter, bounds)
         self.draw_entry_waiting_area(painter, bounds)
         entrance_rect = QRect(bounds.center().x() - 80, bounds.bottom() - 28, 160, 18)
@@ -2932,15 +3010,18 @@ class TopMapWidget(QWidget):
             stack_index = group_index.get(pallet.pallet_number, pallet.stack_order)
             group_key = pallet.pallet_number if self.store.is_entry_waiting_pallet(pallet) else normalize_location_code(pallet.location_code)
             selected_stack = selected_group_key is not None and group_key == selected_group_key and group_counts.get(group_key, 1) > 1
-            shift_x = 22 if selected_stack else 6
-            shift_y = 17 if selected_stack else 5
-            if selected_stack and stack_index > 0:
+            shift_x = TOP_VIEW_SELECTED_STACK_OFFSET_X if selected_stack else TOP_VIEW_STACK_OFFSET_X
+            shift_y = TOP_VIEW_SELECTED_STACK_OFFSET_Y if selected_stack else TOP_VIEW_STACK_OFFSET_Y
+            if pallet.pallet_number != exclude_pallet and selected_stack and stack_index > 0:
                 painter.setPen(QPen(QColor("#5da7d9"), 1, Qt.DotLine))
-                painter.drawLine(base_point, QPoint(base_point.x() + stack_index * shift_x, base_point.y() - stack_index * shift_y))
+                line_target = QPoint(base_point.x() + stack_index * shift_x, base_point.y() - stack_index * shift_y)
+                painter.drawLine(base_point, line_target)
             rect = QRect(base_point.x() - int(width_mm * scale / 2) + stack_index * shift_x, base_point.y() - int(depth_mm * scale / 2) - stack_index * shift_y, max(18, int(width_mm * scale)), max(14, int(depth_mm * scale)))
             if self.dragging_pallet == pallet.pallet_number:
                 rect.moveTo(self.drag_point - self.drag_offset)
-            self.pallet_rects[pallet.pallet_number] = rect; self.draw_pallet(painter, pallet, rect, stack_index=stack_index, stack_count=group_counts.get(group_key, 1))
+            self.pallet_rects[pallet.pallet_number] = rect
+            if pallet.pallet_number != exclude_pallet:
+                self.draw_pallet(painter, pallet, rect, stack_index=stack_index, stack_count=group_counts.get(group_key, 1))
         for note in sorted(self.store.map_notes, key=lambda item: item.updated_at):
             width_mm, depth_mm = footprint_mm_for_size(note.size)
             base_point = self.point_from_note(note)
@@ -2949,7 +3030,80 @@ class TopMapWidget(QWidget):
             if self.dragging_note == note.note_id:
                 rect.moveTo(self.drag_point - self.drag_offset)
             self.note_rects[note.note_id] = rect
-            self.draw_note(painter, note, rect)
+            if note.note_id != exclude_note:
+                self.draw_note(painter, note, rect)
+        if saved_state is not None:
+            self.selected_pallet, self.selected_pallets, self.selected_note, self.hover_pallet, self.hover_note, self.dragging_pallet, self.dragging_note, self.attention_visible = saved_state
+
+    def rebuild_base_cache(self) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        pixmap = QPixmap(self.size())
+        cache_painter = QPainter(pixmap)
+        self.render_top_map(cache_painter, static_cache=True)
+        cache_painter.end()
+        self.base_cache_pixmap = pixmap
+        self.base_cache_key = self.cache_key()
+        self.base_cache_dirty = False
+
+    def rebuild_drag_cache(self) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        exclude_pallet = self.dragging_pallet
+        exclude_note = self.dragging_note
+        pixmap = QPixmap(self.size())
+        cache_painter = QPainter(pixmap)
+        self.render_top_map(cache_painter, exclude_pallet=exclude_pallet, exclude_note=exclude_note, static_cache=True)
+        cache_painter.end()
+        self.drag_cache_pixmap = pixmap
+        self.drag_cache_pallet = exclude_pallet
+        self.drag_cache_note = exclude_note
+
+    def draw_cached_overlay_pallet(self, painter: QPainter, pallet_number: str) -> None:
+        pallet = self.store.get_pallet(pallet_number)
+        rect = self.pallet_rects.get(pallet_number)
+        if pallet is None or rect is None:
+            return
+        members = self.store.group_members(pallet)
+        stack_index = next((index for index, member in enumerate(members) if member.pallet_number == pallet_number), pallet.stack_order)
+        self.draw_pallet(painter, pallet, QRect(rect), stack_index=stack_index, stack_count=max(1, len(members)))
+
+    def draw_cached_overlay_note(self, painter: QPainter, note_id: str) -> None:
+        note = self.store.get_map_note(note_id)
+        rect = self.note_rects.get(note_id)
+        if note is not None and rect is not None:
+            self.draw_note(painter, note, QRect(rect))
+
+    def draw_interaction_overlays(self, painter: QPainter) -> None:
+        painter.setRenderHint(QPainter.Antialiasing)
+        seen: set[str] = set()
+        for pallet_number in self.selected_pallets:
+            self.draw_cached_overlay_pallet(painter, pallet_number)
+            seen.add(pallet_number)
+        for pallet_number in (self.selected_pallet, self.hover_pallet):
+            if pallet_number and pallet_number not in seen:
+                self.draw_cached_overlay_pallet(painter, pallet_number)
+                seen.add(pallet_number)
+        for note_id in {note_id for note_id in (self.selected_note, self.hover_note) if note_id}:
+            self.draw_cached_overlay_note(painter, note_id)
+
+    def draw_drag_foreground(self, painter: QPainter) -> None:
+        painter.setRenderHint(QPainter.Antialiasing)
+        if self.dragging_pallet:
+            pallet = self.store.get_pallet(self.dragging_pallet)
+            source_rect = self.pallet_rects.get(self.dragging_pallet)
+            if pallet is not None and source_rect is not None:
+                rect = QRect(source_rect)
+                rect.moveTo(self.drag_point - self.drag_offset)
+                stack_index, stack_count = self.drag_pallet_draw_info or (pallet.stack_order, 1)
+                self.draw_pallet(painter, pallet, rect, stack_index=stack_index, stack_count=stack_count)
+        if self.dragging_note:
+            note = self.store.get_map_note(self.dragging_note)
+            source_rect = self.note_rects.get(self.dragging_note)
+            if note is not None and source_rect is not None:
+                rect = QRect(source_rect)
+                rect.moveTo(self.drag_point - self.drag_offset)
+                self.draw_note(painter, note, rect)
         if self.dragging_pallet and self.drag_preview_location:
             label_text = visible_location_code(self.drag_preview_location)
             metrics = painter.fontMetrics()
@@ -2967,7 +3121,27 @@ class TopMapWidget(QWidget):
             painter.setFont(QFont("Yu Gothic UI", 12, QFont.Bold))
             painter.setPen(QColor("#fff4b1") if self.drag_preview_location in self.store.blocked_locations else QColor("#dff6ff"))
             painter.drawText(preview_rect, Qt.AlignCenter, label_text)
-        self.draw_grid_labels(painter, bounds, columns, rows)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        if self.is_dragging and (self.dragging_pallet or self.dragging_note):
+            if self.drag_cache_pixmap is None or self.drag_cache_pixmap.size() != self.size() or self.drag_cache_pallet != self.dragging_pallet or self.drag_cache_note != self.dragging_note:
+                self.rebuild_drag_cache()
+            if self.drag_cache_pixmap is not None:
+                painter.drawPixmap(0, 0, self.drag_cache_pixmap)
+            else:
+                self.render_top_map(painter, exclude_pallet=self.dragging_pallet, exclude_note=self.dragging_note)
+            self.draw_drag_foreground(painter)
+            painter.end()
+            return
+        if self.base_cache_dirty or self.base_cache_pixmap is None or self.base_cache_pixmap.size() != self.size():
+            self.rebuild_base_cache()
+        if self.base_cache_pixmap is not None:
+            painter.drawPixmap(0, 0, self.base_cache_pixmap)
+        else:
+            self.render_top_map(painter)
+        self.draw_interaction_overlays(painter)
+        painter.end()
 
     def mousePressEvent(self, event) -> None:
         point = event.position().toPoint()
@@ -3015,6 +3189,7 @@ class TopMapWidget(QWidget):
             self.pan_offset += point - self.pan_anchor
             self.pan_anchor = point
             self.clamp_pan()
+            self.invalidate_base_cache()
             self.update()
             return
         self.update_drag_at(point)
@@ -3060,6 +3235,12 @@ class TopMapWidget(QWidget):
                 self.drag_offset = point - rect.topLeft()
                 self.drag_point = point
                 self.drag_preview_location = None
+                self.hover_target = None
+                self.hover_note = None
+                self.drag_pallet_draw_info = None
+                self.drag_cache_pixmap = None
+                self.drag_cache_pallet = None
+                self.drag_cache_note = None
                 self.setToolTip("")
                 QToolTip.hideText()
                 self.mapNoteSelected.emit(note_id)
@@ -3077,6 +3258,18 @@ class TopMapWidget(QWidget):
                 self.drag_offset = point - rect.topLeft()
                 self.drag_point = point
                 self.drag_preview_location = normalize_location_code(self.store.get_pallet(pallet_number).location_code) if self.store.get_pallet(pallet_number) else None
+                self.hover_target = None
+                self.hover_note = None
+                pallet = self.store.get_pallet(pallet_number)
+                if pallet is not None:
+                    members = self.store.group_members(pallet)
+                    stack_index = next((index for index, member in enumerate(members) if member.pallet_number == pallet_number), pallet.stack_order)
+                    self.drag_pallet_draw_info = (stack_index, max(1, len(members)))
+                else:
+                    self.drag_pallet_draw_info = None
+                self.drag_cache_pixmap = None
+                self.drag_cache_pallet = None
+                self.drag_cache_note = None
                 self.palletSelected.emit(pallet_number)
                 self.setToolTip("")
                 QToolTip.hideText()
@@ -3085,14 +3278,51 @@ class TopMapWidget(QWidget):
                 return True
         return False
 
+    def current_drag_rect(self) -> Optional[QRect]:
+        source_rect = None
+        if self.dragging_note:
+            source_rect = self.note_rects.get(self.dragging_note)
+        elif self.dragging_pallet:
+            source_rect = self.pallet_rects.get(self.dragging_pallet)
+        if source_rect is None:
+            return None
+        rect = QRect(source_rect)
+        rect.moveTo(self.drag_point - self.drag_offset)
+        return rect
+
+    def request_drag_update(self, old_rect: Optional[QRect] = None, new_rect: Optional[QRect] = None) -> None:
+        dirty_rect = QRect()
+        for rect in (old_rect, new_rect):
+            if rect is not None and rect.isValid():
+                expanded = rect.adjusted(-90, -70, 110, 70)
+                dirty_rect = expanded if dirty_rect.isNull() else dirty_rect.united(expanded)
+        if dirty_rect.isNull():
+            dirty_rect = self.rect()
+        self.drag_update_rect = dirty_rect if self.drag_update_rect is None else self.drag_update_rect.united(dirty_rect)
+        if self.drag_update_pending:
+            return
+        self.drag_update_pending = True
+        QTimer.singleShot(self.drag_update_interval_ms, self.flush_drag_update)
+
+    def flush_drag_update(self) -> None:
+        self.drag_update_pending = False
+        dirty_rect = self.drag_update_rect
+        self.drag_update_rect = None
+        if dirty_rect is not None and dirty_rect.isValid():
+            clipped = dirty_rect.intersected(self.rect())
+            self.update(clipped if clipped.isValid() and not clipped.isNull() else self.rect())
+        else:
+            self.update()
+
     def update_drag_at(self, point: QPoint) -> None:
+        old_drag_rect = self.current_drag_rect() if self.is_dragging else None
         self.drag_point = point
         if self.is_dragging and self.dragging_note:
             self.hover_pallet = None
             self.setToolTip("")
             QToolTip.hideText()
             self.setCursor(Qt.ArrowCursor)
-            self.update()
+            self.request_drag_update(old_drag_rect, self.current_drag_rect())
             return
         if self.is_dragging and self.dragging_pallet:
             preview_location = self.nearest_location(point)
@@ -3101,21 +3331,27 @@ class TopMapWidget(QWidget):
             self.setToolTip("")
             QToolTip.hideText()
             self.setCursor(Qt.ArrowCursor)
-            self.update()
+            self.request_drag_update(old_drag_rect, self.current_drag_rect())
             return
         hit = None
         note_hit = None
-        for note_id, rect in self.note_rects.items():
+        for note_id, rect in reversed(list(self.note_rects.items())):
             if rect.contains(point):
                 note_hit = note_id
                 break
-        for pallet_number, rect in self.pallet_rects.items():
-            if rect.contains(point):
-                hit = pallet_number
-                break
+        if note_hit is None:
+            for pallet_number, rect in reversed(list(self.pallet_rects.items())):
+                if rect.contains(point):
+                    hit = pallet_number
+                    break
+        new_hover_target = ("note", note_hit) if note_hit else (("pallet", hit) if hit else None)
+        if new_hover_target == self.hover_target:
+            return
+        self.hover_target = new_hover_target
+        self.hover_note = note_hit
         self.hover_pallet = hit
         note = self.store.get_map_note(note_hit) if note_hit else None
-        pallet = self.store.get_pallet(hit) if hit and note is None else None
+        pallet = self.store.get_pallet(hit) if hit else None
         if note:
             text = map_note_popup_text(note)
             self.setToolTip(text)
@@ -3133,6 +3369,11 @@ class TopMapWidget(QWidget):
     def finish_drag_state(self, pallet_number: Optional[str], show_detail: bool = False) -> None:
         self.dragging_pallet = None
         self.dragging_note = None
+        self.hover_target = None
+        self.drag_cache_pixmap = None
+        self.drag_cache_pallet = None
+        self.drag_cache_note = None
+        self.drag_pallet_draw_info = None
         self.drag_preview_location = None
         self.is_dragging = False
         self.setToolTip("")
@@ -3209,6 +3450,7 @@ class TopMapWidget(QWidget):
                     if self.touch_zoom_midpoint is not None:
                         self.pan_offset += midpoint - self.touch_zoom_midpoint
                     self.clamp_pan()
+                    self.invalidate_base_cache()
                     self.update()
                 else:
                     self.finish_drag_state(self.dragging_pallet, show_detail=False)
@@ -3225,19 +3467,23 @@ class TopMapWidget(QWidget):
             return True
         return super().event(event)
 
+    def resizeEvent(self, event) -> None:
+        self.invalidate_base_cache()
+        super().resizeEvent(event)
+
     def wheelEvent(self, event) -> None:
         delta = event.angleDelta().y()
         if delta:
-            self.zoom = max(0.5, min(2.8, self.zoom * (1.1 if delta > 0 else 0.9))); self.clamp_pan(); self.update()
+            self.zoom = max(0.5, min(2.8, self.zoom * (1.1 if delta > 0 else 0.9))); self.clamp_pan(); self.invalidate_base_cache(); self.update()
 
     def zoom_in(self) -> None:
-        self.zoom = min(2.8, self.zoom * 1.15); self.clamp_pan(); self.update()
+        self.zoom = min(2.8, self.zoom * 1.15); self.clamp_pan(); self.invalidate_base_cache(); self.update()
 
     def zoom_out(self) -> None:
-        self.zoom = max(0.5, self.zoom / 1.15); self.clamp_pan(); self.update()
+        self.zoom = max(0.5, self.zoom / 1.15); self.clamp_pan(); self.invalidate_base_cache(); self.update()
 
     def reset_zoom(self) -> None:
-        self.zoom = 1.0; self.pan_offset = QPoint(); self.update()
+        self.zoom = 1.0; self.pan_offset = QPoint(); self.invalidate_base_cache(); self.update()
 
 class IsometricMapWidget(QWidget):
     palletSelected = Signal(str)
@@ -3422,11 +3668,10 @@ class IsometricMapWidget(QWidget):
         painter.setBrush(fill); painter.drawPolygon(top)
         label_anchor = min([QPointF(point.x(), point.y() - height) for point in corners_bottom], key=lambda point: point.y() + (point.x() * 0.02))
         painter.setPen(QColor("#daf5ff")); painter.setFont(QFont("Yu Gothic UI", 10, QFont.Bold)); painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 15), pallet.pallet_number)
-        painter.setFont(QFont("Yu Gothic UI", 10)); painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 29), pallet.summary_text[:14])
         if waiting_move:
             painter.setPen(QColor("#ffd866" if self.attention_visible else "#b59234"))
             painter.setFont(QFont("Yu Gothic UI", 10, QFont.Bold))
-            painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 40), "入口待機")
+            painter.drawText(QPointF(label_anchor.x() + 4, label_anchor.y() + 29), "入口待機")
         min_x = min(point.x() for point in corners_bottom)
         max_x = max(point.x() for point in corners_bottom)
         min_y = min(point.y() for point in corners_bottom) - height
@@ -3649,6 +3894,14 @@ class MainWindow(QMainWindow):
         )
         self.cell_popup.hide()
         self.cell_popup_timer.timeout.connect(self.cell_popup.hide)
+        self.table_long_press_timer = QTimer(self)
+        self.table_long_press_timer.setSingleShot(True)
+        self.table_long_press_timer.timeout.connect(self.enable_table_multi_select_from_long_press)
+        self.table_long_press_table: Optional[QTableWidget] = None
+        self.table_long_press_point = QPoint()
+        self.table_press_point = QPoint()
+        self.table_press_moved = False
+        self.table_multi_select_mode: set[QTableWidget] = set()
         self.store_dirty = False
         self.setWindowTitle("Warehouse Management App - PySide6"); self.resize(1480, 920); self.setMinimumSize(900, 620)
         if ICON_PATH.exists():
@@ -3746,7 +3999,7 @@ class MainWindow(QMainWindow):
         inventory_header = TouchFriendlyHeaderView(Qt.Horizontal, self.inventory_table)
         self.inventory_table.setHorizontalHeader(inventory_header)
         self.inventory_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.inventory_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.inventory_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.inventory_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.inventory_table.setShowGrid(True)
         self.inventory_table.setGridStyle(Qt.SolidLine)
@@ -3759,6 +4012,7 @@ class MainWindow(QMainWindow):
         self.inventory_table.horizontalHeader().setMinimumSectionSize(72)
         self.inventory_table.horizontalHeader().setMinimumHeight(42)
         self.inventory_table.verticalHeader().setDefaultSectionSize(36)
+        self.configure_table_for_touch(self.inventory_table)
         for col, (_key, _label, width) in enumerate(self.INVENTORY_COLUMNS):
             self.inventory_table.setColumnWidth(col, width)
         self.inventory_hint = QLabel("列幅は項目名の境目をドラッグで調整できます。ダブルクリックで真上ビューの位置を確認できます。")
@@ -3784,7 +4038,7 @@ class MainWindow(QMainWindow):
         self.shipment_table = QTableWidget(0, 10); self.shipment_table.setObjectName("shipmentTable"); self.shipment_table.setHorizontalHeaderLabels(["出庫日", "パレット番号", "品名", "品数", "総枚数", "総高さ", "最終位置", "入庫日", "色", "備考"])
         shipment_header = TouchFriendlyHeaderView(Qt.Horizontal, self.shipment_table)
         self.shipment_table.setHorizontalHeader(shipment_header)
-        self.shipment_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.shipment_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.shipment_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.shipment_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.shipment_table.setShowGrid(True)
         self.shipment_table.setGridStyle(Qt.SolidLine)
         self.shipment_table.setAlternatingRowColors(True)
@@ -3796,6 +4050,7 @@ class MainWindow(QMainWindow):
         self.shipment_table.horizontalHeader().setMinimumSectionSize(72)
         self.shipment_table.horizontalHeader().setMinimumHeight(42)
         self.shipment_table.verticalHeader().setDefaultSectionSize(36)
+        self.configure_table_for_touch(self.shipment_table)
         self.shipment_table.setContextMenuPolicy(Qt.CustomContextMenu); self.shipment_table.customContextMenuRequested.connect(self.open_shipment_context_menu)
         self.shipment_table.setColumnWidth(0, 118)
         self.shipment_table.setColumnWidth(1, 130)
@@ -3874,10 +4129,10 @@ class MainWindow(QMainWindow):
                 """,
             ),
             ("基本操作", "1. 新規登録でパレット番号・入庫日・明細を入力\n2. 明細を追加してから OK で登録\n3. 登録直後は仮置きエリア（未配置）に入るため、真上ビューで保管場所へドラッグ移動\n4. 地図上の注釈はメモ追加から登録できます。メモは在庫ではなく地図メモとして扱います。"),
-            ("仮置きエリア（未配置）", "新規登録・メモ追加・出庫復元・列解除・積み替えで作成した空パレットは仮置きエリアへ入ります。\n上限は10個です。上限に達した場合は、先に仮置きエリア内のパレットやメモを倉庫内へ配置してください。\n仮置き中のパレットは、パレット数・明細数・総枚数・面積使用率にカウントしません。"),
+            ("仮置きエリア（未配置）", "新規登録・メモ追加・出庫復元・列解除・積み替えで作成した空パレットは仮置きエリアへ入ります。\n上限は10個です。上限に達した場合は、先に仮置きエリア内のパレットやメモを倉庫内へ配置してください。\n仮置き中のパレットは、パレット数・明細数・総枚数・使用率にカウントしません。"),
             ("位置変更", "真上ビューでパレットやメモをドラッグ、またはタブレットでスワイプして移動します。\n2本指ピンチで拡大縮小できます。\nある程度グリッドに吸着しますが、細かい位置調整もできます。\nパレットやメモのない場所をクリックすると選択解除できます。\nパレットを右クリックすると、編集・向き変更・段操作・列解除・積み替え・出庫のメニューを表示できます。\nメモを右クリックすると撤去できます。"),
             ("積み重ね", "1ロケーション = 1スタック列です。同じマスに置いたパレットだけが同じ列として扱われます。\n隣マスや上下左右の別マスに置いた場合は積み重なりません。\n段を上げる / 下げるで同じ列の上下順を入れ替えます。\n列を解除は、選択中のパレットを1枚だけ外して仮置きエリア（未配置）へ移動します。"),
-            ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n面積使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、面積使用率では1パレット列分としてカウントします。\nメモは在庫ではないため、パレット数・明細数・総枚数・高さ・出庫履歴には含めません。"),
+            ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、使用率では1パレット列分としてカウントします。\n使用率の分母は通路列 B / E / F / J を除いた通常置場を基準にし、置けないマスも除外します。\n通路列にパレットを置いた場合は分子に含めるため、使用率が100%を超えることがあります。\nメモは在庫ではないため、パレット数・明細数・総枚数・高さ・出庫履歴には含めません。"),
             ("置けないマス設定", "置けないマス設定を押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
             ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\nパレット番号・入庫日・色・向き・明細の追加/削除/順番変更ができます。\nメモを選択している場合は、同じボタンがメモ編集になり、本文・サイズ・色を変更できます。\n厚みと枚数は行内の +/- で調整できます。厚みが 3-3.5 のような範囲入力でも、+/- を使うと最大値基準の単一値へ切り替えて調整します。"),
             ("積み替え", "積み替えでは、選択中パレットの一部枚数を既存パレットまたは空パレットへ移動できます。\n同じ明細でも自動では合算しません。\n空パレットを作る場合は仮置きエリア（未配置）に作成されます。"),
@@ -4015,6 +4270,43 @@ class MainWindow(QMainWindow):
         self.update_stack_detail_style()
         self.update_detail_overlay_geometry()
 
+    def configure_table_for_touch(self, table: QTableWidget) -> None:
+        table.viewport().setAttribute(Qt.WA_AcceptTouchEvents, True)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setAutoScroll(False)
+        table.setDragDropMode(QAbstractItemView.NoDragDrop)
+        touch_gesture = getattr(QScroller, "TouchGesture", None)
+        if touch_gesture is not None:
+            QScroller.grabGesture(table.viewport(), touch_gesture)
+
+    def table_for_viewport(self, source) -> Optional[QTableWidget]:
+        for table in (getattr(self, "inventory_table", None), getattr(self, "shipment_table", None)):
+            if table is not None and source == table.viewport():
+                return table
+        return None
+
+    def enable_table_multi_select_from_long_press(self) -> None:
+        table = self.table_long_press_table
+        if table is None:
+            return
+        row = table.rowAt(self.table_long_press_point.y())
+        if row < 0:
+            return
+        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table_multi_select_mode.add(table)
+        table.selectRow(row)
+        QToolTip.showText(table.viewport().mapToGlobal(self.table_long_press_point), "複数選択モード", table)
+
+    def disable_table_multi_select(self, table: Optional[QTableWidget] = None) -> None:
+        tables = [table] if table is not None else list(self.table_multi_select_mode)
+        for target in tables:
+            if target is not None:
+                target.setSelectionMode(QAbstractItemView.SingleSelection)
+                self.table_multi_select_mode.discard(target)
+        self.table_long_press_timer.stop()
+        self.table_long_press_table = None
+
     def eventFilter(self, source, event) -> bool:
         detail_frame = getattr(self, "detail_frame", None)
         detail_resize_handle = getattr(self, "detail_resize_handle", None)
@@ -4037,16 +4329,64 @@ class MainWindow(QMainWindow):
         if shipment_table is not None:
             popup_tables[shipment_table.viewport()] = shipment_table
         popup_table = popup_tables.get(source)
+        touch_table = self.table_for_viewport(source)
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+            self.disable_table_multi_select()
+        if touch_table is not None:
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                point = event.position().toPoint()
+                self.table_press_point = point
+                self.table_press_moved = False
+                if touch_table.rowAt(point.y()) < 0:
+                    self.disable_table_multi_select(touch_table)
+                elif event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier):
+                    touch_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+                    self.table_multi_select_mode.add(touch_table)
+                elif touch_table not in self.table_multi_select_mode:
+                    touch_table.setSelectionMode(QAbstractItemView.SingleSelection)
+                    self.table_long_press_table = touch_table
+                    self.table_long_press_point = point
+                    self.table_long_press_timer.start(650)
+            elif event.type() == QEvent.MouseMove and self.table_long_press_table == touch_table:
+                point = event.position().toPoint()
+                if (point - self.table_press_point).manhattanLength() > 12:
+                    self.table_press_moved = True
+                    self.table_long_press_timer.stop()
+                    self.table_long_press_table = None
+                    self.hide_table_popup()
+            elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if touch_table not in self.table_multi_select_mode:
+                    self.table_long_press_timer.stop()
+                    self.table_long_press_table = None
+            elif event.type() == QEvent.TouchBegin:
+                points = event.points()
+                if points:
+                    point = points[0].position().toPoint()
+                    self.table_press_point = point
+                    self.table_press_moved = False
+                    self.table_long_press_table = touch_table
+                    self.table_long_press_point = point
+                    self.table_long_press_timer.start(650)
+            elif event.type() == QEvent.TouchUpdate and self.table_long_press_table == touch_table:
+                points = event.points()
+                if points and (points[0].position().toPoint() - self.table_press_point).manhattanLength() > 12:
+                    self.table_press_moved = True
+                    self.table_long_press_timer.stop()
+                    self.table_long_press_table = None
+                    self.hide_table_popup()
+            elif event.type() == QEvent.TouchEnd and touch_table not in self.table_multi_select_mode:
+                self.table_long_press_timer.stop()
+                self.table_long_press_table = None
         if event.type() in (QEvent.MouseButtonPress, QEvent.TouchBegin):
             allowed_sources = set(popup_tables.keys())
             allowed_sources.update({inventory_table, shipment_table, self.cell_popup})
             if source not in allowed_sources:
                 self.hide_table_popup()
         if popup_table is not None:
-            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton and not self.table_press_moved:
                 point = event.position().toPoint()
                 self.schedule_table_popup_from_point(popup_table, point)
-            elif event.type() == QEvent.TouchEnd:
+            elif event.type() == QEvent.TouchEnd and not self.table_press_moved:
                 points = event.points()
                 if points:
                     point = points[0].position().toPoint()
@@ -4287,6 +4627,38 @@ class MainWindow(QMainWindow):
             padding:9px 6px;
             font:700 12.5pt 'Yu Gothic UI', 'Segoe UI';
         }
+        QTableWidget QScrollBar:vertical {
+            background:#07121f;
+            width:30px;
+            margin:0;
+            border-left:1px solid #254d77;
+        }
+        QTableWidget QScrollBar::handle:vertical {
+            background:#3f89c8;
+            min-height:54px;
+            border-radius:10px;
+            margin:4px;
+        }
+        QTableWidget QScrollBar::handle:vertical:hover {
+            background:#65b8f4;
+        }
+        QTableWidget QScrollBar:horizontal {
+            background:#07121f;
+            height:28px;
+            margin:0;
+            border-top:1px solid #254d77;
+        }
+        QTableWidget QScrollBar::handle:horizontal {
+            background:#3f89c8;
+            min-width:54px;
+            border-radius:10px;
+            margin:4px;
+        }
+        QTableWidget QScrollBar::add-line,
+        QTableWidget QScrollBar::sub-line {
+            width:0;
+            height:0;
+        }
         QLabel#inventoryHint {
             color:#8fb6d8;
             background:#0c1827;
@@ -4394,7 +4766,8 @@ class MainWindow(QMainWindow):
             pallet.color_key = resolve_effective_color_key(pallet.color_mode, pallet.last_manual_color_key, pallet.items)
         placed_pallets = self.placed_pallets()
         capacity = self.capacity_percent()
-        self.summary_label.setText(f"パレット {len(placed_pallets)} / 明細 {sum(len(p.items) for p in placed_pallets)} / 総枚数 {sum(p.total_sheets for p in placed_pallets)} / 面積使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
+        self.summary_label.setText(f"パレット {len(placed_pallets)} / 明細 {sum(len(p.items) for p in placed_pallets)} / 総枚数 {sum(p.total_sheets for p in placed_pallets)} / 使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
+        self.top_map.invalidate_base_cache()
         self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_shipment_table(); self.refresh_detail()
 
     def normalize_store_stacks(self) -> None:
@@ -4475,14 +4848,31 @@ class MainWindow(QMainWindow):
     def placed_pallets(self) -> List[PalletRecord]:
         return [pallet for pallet in self.store.pallets if not self.store.is_entry_waiting_pallet(pallet)]
 
-    def capacity_percent(self) -> float:
-        total_cells = GRID_COLUMNS * GRID_ROWS
+    def aisle_cells_for_capacity(self) -> set[str]:
+        return {
+            format_location_code(col, row)
+            for col in range(GRID_COLUMNS)
+            if is_aisle_column(col)
+            for row in range(GRID_ROWS)
+        }
+
+    def capacity_usable_cells(self) -> set[str]:
+        all_cells = {
+            format_location_code(col, row)
+            for col in range(GRID_COLUMNS)
+            for row in range(GRID_ROWS)
+        }
         blocked_cells = {visible_location_code(location) for location in self.store.blocked_locations}
-        available_cells = max(0, total_cells - len(blocked_cells))
+        return all_cells - self.aisle_cells_for_capacity() - blocked_cells
+
+    def capacity_percent(self) -> float:
+        usable_cells = self.capacity_usable_cells()
+        blocked_cells = {visible_location_code(location) for location in self.store.blocked_locations}
         used_cells = {visible_location_code(pallet.location_code) for pallet in self.placed_pallets()}
-        if available_cells <= 0:
+        used_cells.difference_update(blocked_cells)
+        if not usable_cells:
             return 0.0
-        return (len(used_cells) / available_cells) * 100.0
+        return (len(used_cells) / len(usable_cells)) * 100.0
 
     def refresh_inventory_table(self) -> None:
         rows: Dict[Tuple[str, str, str, str, str], dict] = {}
@@ -4908,6 +5298,7 @@ class MainWindow(QMainWindow):
         self.top_map.selected_pallets = set(valid_numbers)
         self.top_map.selected_note = None
         self.top_map.hover_pallet = primary
+        self.top_map.invalidate_base_cache()
         self.iso_map.selected_pallet = None
         if len(valid_numbers) > 1:
             self.top_map.zoom = 1.0
@@ -4949,7 +5340,15 @@ class MainWindow(QMainWindow):
             self.detail_frame_manual_position = None
         self.current_pallet_number = pallet_number
         self.current_note_id = None
-        self.top_map.selected_pallet = pallet_number; self.top_map.selected_pallets = {pallet_number}; self.top_map.selected_note = None; self.iso_map.selected_pallet = pallet_number; self.apply_responsive_layout(); self.top_map.update(); self.iso_map.update(); self.refresh_detail()
+        self.top_map.selected_pallet = pallet_number
+        self.top_map.selected_pallets = {pallet_number}
+        self.top_map.selected_note = None
+        self.iso_map.selected_pallet = pallet_number
+        self.apply_responsive_layout()
+        self.top_map.invalidate_base_cache()
+        self.top_map.update()
+        self.iso_map.update()
+        self.refresh_detail()
 
     def select_map_note(self, note_id: str) -> None:
         if self.current_note_id != note_id:
@@ -4963,6 +5362,7 @@ class MainWindow(QMainWindow):
         self.top_map.selected_pallets = set()
         self.iso_map.selected_pallet = None
         self.apply_responsive_layout()
+        self.top_map.invalidate_base_cache()
         self.top_map.update()
         self.iso_map.update()
         self.refresh_detail()
@@ -5540,7 +5940,11 @@ class MainWindow(QMainWindow):
         self.store = imported_store; self.top_map.store = self.store; self.iso_map.store = self.store; self.current_pallet_number = None; self.current_note_id = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.mark_store_dirty(immediate=True); self.refresh_all(); QMessageBox.information(self, "Import", f"読み込みました。\n{file_path}")
 
     def clear_selection(self) -> None:
-        self.current_pallet_number = None; self.current_note_id = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.apply_responsive_layout(); self.top_map.update(); self.iso_map.update(); self.refresh_detail()
+        self.disable_table_multi_select()
+        for table in (getattr(self, "inventory_table", None), getattr(self, "shipment_table", None)):
+            if table is not None:
+                table.clearSelection()
+        self.current_pallet_number = None; self.current_note_id = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.top_map.hover_note = None; self.top_map.hover_target = None; self.iso_map.selected_pallet = None; self.apply_responsive_layout(); self.top_map.invalidate_base_cache(); self.top_map.update(); self.iso_map.update(); self.refresh_detail()
 
     def current_zoom_widget(self) -> Optional[QWidget]:
         current = self.tabs.currentWidget()
