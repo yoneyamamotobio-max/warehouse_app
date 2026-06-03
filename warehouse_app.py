@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSettings, Qt, Signal, QTimer
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QItemSelectionModel, QSettings, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import QApplication, QAbstractItemView, QAbstractSpinBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QRadioButton, QScrollArea, QScroller, QSpinBox, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QToolTip, QVBoxLayout, QWidget
 
@@ -3999,7 +3999,7 @@ class MainWindow(QMainWindow):
         inventory_header = TouchFriendlyHeaderView(Qt.Horizontal, self.inventory_table)
         self.inventory_table.setHorizontalHeader(inventory_header)
         self.inventory_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.inventory_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.inventory_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.inventory_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.inventory_table.setShowGrid(True)
         self.inventory_table.setGridStyle(Qt.SolidLine)
@@ -4038,7 +4038,7 @@ class MainWindow(QMainWindow):
         self.shipment_table = QTableWidget(0, 10); self.shipment_table.setObjectName("shipmentTable"); self.shipment_table.setHorizontalHeaderLabels(["出庫日", "パレット番号", "品名", "品数", "総枚数", "総高さ", "最終位置", "入庫日", "色", "備考"])
         shipment_header = TouchFriendlyHeaderView(Qt.Horizontal, self.shipment_table)
         self.shipment_table.setHorizontalHeader(shipment_header)
-        self.shipment_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.shipment_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.shipment_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.shipment_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.shipment_table.setShowGrid(True)
         self.shipment_table.setGridStyle(Qt.SolidLine)
         self.shipment_table.setAlternatingRowColors(True)
@@ -4271,14 +4271,11 @@ class MainWindow(QMainWindow):
         self.update_detail_overlay_geometry()
 
     def configure_table_for_touch(self, table: QTableWidget) -> None:
-        table.viewport().setAttribute(Qt.WA_AcceptTouchEvents, True)
+        table.viewport().setAttribute(Qt.WA_AcceptTouchEvents, False)
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         table.setAutoScroll(False)
         table.setDragDropMode(QAbstractItemView.NoDragDrop)
-        touch_gesture = getattr(QScroller, "TouchGesture", None)
-        if touch_gesture is not None:
-            QScroller.grabGesture(table.viewport(), touch_gesture)
 
     def table_for_viewport(self, source) -> Optional[QTableWidget]:
         for table in (getattr(self, "inventory_table", None), getattr(self, "shipment_table", None)):
@@ -4295,14 +4292,25 @@ class MainWindow(QMainWindow):
             return
         table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table_multi_select_mode.add(table)
-        table.selectRow(row)
+        self.add_table_row_to_selection(table, row)
         QToolTip.showText(table.viewport().mapToGlobal(self.table_long_press_point), "複数選択モード", table)
+        self.table_long_press_table = None
+
+    def add_table_row_to_selection(self, table: QTableWidget, row: int) -> None:
+        if row < 0 or row >= table.rowCount() or table.columnCount() <= 0:
+            return
+        table.setCurrentCell(row, max(0, table.currentColumn()))
+        index = table.model().index(row, 0)
+        table.selectionModel().select(index, QItemSelectionModel.Select | QItemSelectionModel.Rows)
+
+    def add_table_row_at_point_to_selection(self, table: QTableWidget, point: QPoint) -> None:
+        self.add_table_row_to_selection(table, table.rowAt(point.y()))
 
     def disable_table_multi_select(self, table: Optional[QTableWidget] = None) -> None:
         tables = [table] if table is not None else list(self.table_multi_select_mode)
         for target in tables:
             if target is not None:
-                target.setSelectionMode(QAbstractItemView.SingleSelection)
+                target.setSelectionMode(QAbstractItemView.ExtendedSelection)
                 self.table_multi_select_mode.discard(target)
         self.table_long_press_timer.stop()
         self.table_long_press_table = None
@@ -4337,44 +4345,37 @@ class MainWindow(QMainWindow):
                 point = event.position().toPoint()
                 self.table_press_point = point
                 self.table_press_moved = False
+                touch_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+                self.table_long_press_timer.stop()
+                self.table_long_press_table = None
                 if touch_table.rowAt(point.y()) < 0:
-                    self.disable_table_multi_select(touch_table)
-                elif event.modifiers() & (Qt.ControlModifier | Qt.ShiftModifier):
-                    touch_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-                    self.table_multi_select_mode.add(touch_table)
-                elif touch_table not in self.table_multi_select_mode:
-                    touch_table.setSelectionMode(QAbstractItemView.SingleSelection)
-                    self.table_long_press_table = touch_table
-                    self.table_long_press_point = point
-                    self.table_long_press_timer.start(650)
-            elif event.type() == QEvent.MouseMove and self.table_long_press_table == touch_table:
+                    touch_table.clearSelection()
+            elif event.type() == QEvent.MouseMove and event.buttons() & Qt.LeftButton:
                 point = event.position().toPoint()
                 if (point - self.table_press_point).manhattanLength() > 12:
                     self.table_press_moved = True
-                    self.table_long_press_timer.stop()
-                    self.table_long_press_table = None
                     self.hide_table_popup()
             elif event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
-                if touch_table not in self.table_multi_select_mode:
-                    self.table_long_press_timer.stop()
-                    self.table_long_press_table = None
+                self.table_long_press_timer.stop()
+                self.table_long_press_table = None
             elif event.type() == QEvent.TouchBegin:
                 points = event.points()
                 if points:
                     point = points[0].position().toPoint()
                     self.table_press_point = point
                     self.table_press_moved = False
-                    self.table_long_press_table = touch_table
-                    self.table_long_press_point = point
-                    self.table_long_press_timer.start(650)
-            elif event.type() == QEvent.TouchUpdate and self.table_long_press_table == touch_table:
+                    touch_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+                    self.add_table_row_at_point_to_selection(touch_table, point)
+            elif event.type() == QEvent.TouchUpdate:
                 points = event.points()
-                if points and (points[0].position().toPoint() - self.table_press_point).manhattanLength() > 12:
-                    self.table_press_moved = True
-                    self.table_long_press_timer.stop()
-                    self.table_long_press_table = None
-                    self.hide_table_popup()
-            elif event.type() == QEvent.TouchEnd and touch_table not in self.table_multi_select_mode:
+                if points:
+                    point = points[0].position().toPoint()
+                    if (point - self.table_press_point).manhattanLength() > 12:
+                        self.table_press_moved = True
+                        self.hide_table_popup()
+                    self.add_table_row_at_point_to_selection(touch_table, point)
+                return True
+            elif event.type() == QEvent.TouchEnd:
                 self.table_long_press_timer.stop()
                 self.table_long_press_table = None
         if event.type() in (QEvent.MouseButtonPress, QEvent.TouchBegin):
