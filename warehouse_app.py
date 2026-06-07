@@ -2612,7 +2612,6 @@ class TopMapWidget(QWidget):
         self.dragging_note = None
         self.is_dragging = False
         self.drag_start_point = QPoint()
-        self.drag_preview_location: Optional[str] = None
         self.base_cache_pixmap: Optional[QPixmap] = None
         self.base_cache_key = None
         self.base_cache_dirty = True
@@ -2855,14 +2854,6 @@ class TopMapWidget(QWidget):
             if rect.contains(point):
                 return location
         return None
-
-    def drag_preview_location_at(self, point: QPoint) -> Optional[str]:
-        bounds = self.scaled_bounds()
-        if bounds.width() <= 0 or bounds.height() <= 0 or not bounds.contains(point):
-            return None
-        col = min(GRID_COLUMNS - 1, max(0, int((point.x() - bounds.left()) * GRID_COLUMNS / bounds.width())))
-        row = min(GRID_ROWS - 1, max(0, int((point.y() - bounds.top()) * GRID_ROWS / bounds.height())))
-        return format_location_code(col, row)
 
     def normalized_position_for_location(self, location: str, pallet: Optional[PalletRecord] = None) -> Tuple[float, float]:
         col, row = location_to_grid(location)
@@ -3119,10 +3110,9 @@ class TopMapWidget(QWidget):
                 rect.moveTo(self.drag_point - self.drag_offset)
                 color = pallet_color(pallet)
                 fill = QColor(color)
-                fill.setAlpha(105)
-                outline = QColor(color.lighter(165))
+                fill.setAlpha(92)
                 painter.setBrush(fill)
-                painter.setPen(QPen(outline, 3))
+                painter.setPen(QPen(QColor("#f6fbff"), 2))
                 painter.drawRect(rect)
                 painter.setPen(QColor("#ffffff"))
                 painter.setFont(QFont("Consolas", 8, QFont.Bold))
@@ -3135,30 +3125,13 @@ class TopMapWidget(QWidget):
                 rect.moveTo(self.drag_point - self.drag_offset)
                 color = QColor(COLOR_PRESETS.get(note.color_key, COLOR_PRESETS["YELLOW"])[1] or "#FFC34D")
                 fill = QColor(color)
-                fill.setAlpha(70)
+                fill.setAlpha(60)
                 painter.setBrush(fill)
-                painter.setPen(QPen(color.lighter(145), 4))
+                painter.setPen(QPen(QColor("#fff8c9"), 3))
                 painter.drawRect(rect)
                 painter.setPen(QColor("#fff8c9"))
                 painter.setFont(QFont("Yu Gothic UI", 8, QFont.Bold))
                 painter.drawText(rect.adjusted(5, 3, -5, -3), Qt.AlignTop | Qt.AlignLeft, "メモ")
-        if self.dragging_pallet and self.drag_preview_location:
-            label_text = visible_location_code(self.drag_preview_location)
-            metrics = painter.fontMetrics()
-            text_width = metrics.horizontalAdvance(label_text)
-            preview_rect = QRect(self.drag_point.x() + 14, self.drag_point.y() - 30, max(52, text_width + 18), 22)
-            max_x = max(8, self.width() - preview_rect.width() - 8)
-            max_y = max(8, self.height() - preview_rect.height() - 8)
-            preview_rect.moveLeft(max(8, min(preview_rect.x(), max_x)))
-            preview_rect.moveTop(max(8, min(preview_rect.y(), max_y)))
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(10, 22, 34, 180))
-            painter.drawRoundedRect(preview_rect, 6, 6)
-            painter.setPen(QPen(QColor("#7fd0ff"), 1))
-            painter.drawRoundedRect(preview_rect, 6, 6)
-            painter.setFont(QFont("Yu Gothic UI", 12, QFont.Bold))
-            painter.setPen(QColor("#fff4b1") if self.drag_preview_location in self.store.blocked_locations else QColor("#dff6ff"))
-            painter.drawText(preview_rect, Qt.AlignCenter, label_text)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -3272,7 +3245,6 @@ class TopMapWidget(QWidget):
                 self.drag_start_point = point
                 self.drag_offset = point - rect.topLeft()
                 self.drag_point = point
-                self.drag_preview_location = None
                 self.hover_target = None
                 self.hover_note = None
                 self.drag_cache_pixmap = None
@@ -3281,7 +3253,6 @@ class TopMapWidget(QWidget):
                 self.setToolTip("")
                 QToolTip.hideText()
                 self.setCursor(Qt.ArrowCursor)
-                self.mapNoteSelected.emit(note_id)
                 self.dragStarted.emit()
                 self.rebuild_drag_cache()
                 self.update()
@@ -3296,13 +3267,11 @@ class TopMapWidget(QWidget):
                 self.drag_start_point = point
                 self.drag_offset = point - rect.topLeft()
                 self.drag_point = point
-                self.drag_preview_location = normalize_location_code(self.store.get_pallet(pallet_number).location_code) if self.store.get_pallet(pallet_number) else None
                 self.hover_target = None
                 self.hover_note = None
                 self.drag_cache_pixmap = None
                 self.drag_cache_pallet = None
                 self.drag_cache_note = None
-                self.palletSelected.emit(pallet_number)
                 self.setToolTip("")
                 QToolTip.hideText()
                 self.setCursor(Qt.ArrowCursor)
@@ -3328,7 +3297,7 @@ class TopMapWidget(QWidget):
         dirty_rect = QRect()
         for rect in (old_rect, new_rect):
             if rect is not None and rect.isValid():
-                expanded = rect.adjusted(-18, -42, 96, 22)
+                expanded = rect.adjusted(-8, -8, 8, 8)
                 dirty_rect = expanded if dirty_rect.isNull() else dirty_rect.united(expanded)
         if dirty_rect.isNull():
             dirty_rect = self.rect()
@@ -3343,8 +3312,6 @@ class TopMapWidget(QWidget):
             self.request_drag_update(old_drag_rect, self.current_drag_rect())
             return
         if self.is_dragging and self.dragging_pallet:
-            preview_location = self.drag_preview_location_at(point)
-            self.drag_preview_location = normalize_location_code(preview_location) if preview_location else None
             self.hover_pallet = None
             self.request_drag_update(old_drag_rect, self.current_drag_rect())
             return
@@ -3388,7 +3355,6 @@ class TopMapWidget(QWidget):
         self.drag_cache_pixmap = None
         self.drag_cache_pallet = None
         self.drag_cache_note = None
-        self.drag_preview_location = None
         self.is_dragging = False
         self.setToolTip("")
         QToolTip.hideText()
