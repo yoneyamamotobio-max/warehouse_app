@@ -453,17 +453,6 @@
     "P18",
     "P20"
   ],
-  "color_label_notes": {
-    "NAVY": "空パレット",
-    "ORANGE": "スライス余り",
-    "TEAL": "明細不明",
-    "LIME": "",
-    "BROWN": "",
-    "WHITE": "",
-    "BLACK": "",
-    "CYAN": "",
-    "MAGENTA": ""
-  },
   "pallets": [
     {
       "pallet_number": "001",

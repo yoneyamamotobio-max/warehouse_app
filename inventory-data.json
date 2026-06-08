@@ -453,6 +453,17 @@
     "P18",
     "P20"
   ],
+  "color_label_notes": {
+    "NAVY": "空パレット",
+    "ORANGE": "スライス余り",
+    "TEAL": "明細不明",
+    "LIME": "",
+    "BROWN": "",
+    "WHITE": "",
+    "BLACK": "",
+    "CYAN": "",
+    "MAGENTA": ""
+  },
   "pallets": [
     {
       "pallet_number": "001",
@@ -12793,10 +12804,10 @@
       "note_id": "1779d63e892d45e69ed5edaef266f326",
       "text": "OL空パレ４",
       "size": "LL",
-      "map_x": 0.53125,
-      "map_y": 0.825,
+      "map_x": 0.5416666666666666,
+      "map_y": 0.8043478260869565,
       "color_key": "ORANGE",
-      "updated_at": "2026-06-01 13:59:55"
+      "updated_at": "2026-06-08 15:26:10"
     },
     {
       "note_id": "e31ff3c754874066a1f02d233038a1de",

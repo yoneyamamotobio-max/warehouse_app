@@ -59,25 +59,40 @@ COLOR_PRESETS = {
     "CYAN": ("水", "#67E8F9"),
     "MAGENTA": ("紅", "#E85AD8"),
 }
-COLOR_CHOICE_LABELS = {
-    "AUTO": "自動",
-    "RED": "赤 [#38]",
-    "BLUE": "青 [#39]",
-    "GREEN": "緑 [#45]",
-    "PINK": "桃 [#50]",
-    "YELLOW": "黄 [#40]",
-    "PURPLE": "紫 [C/C]",
-    "GRAY": "その他 [混在 / その他]",
-    "ORANGE": "橙",
-    "TEAL": "青緑",
-    "NAVY": "紺",
-    "LIME": "黄緑",
-    "BROWN": "茶",
-    "WHITE": "白",
-    "BLACK": "黒",
-    "CYAN": "水",
-    "MAGENTA": "紅",
+FIXED_COLOR_LABEL_NOTES = {
+    "RED": "#38",
+    "BLUE": "#39",
+    "YELLOW": "#40",
+    "GREEN": "#45",
+    "PINK": "#50",
+    "PURPLE": "C/C",
+    "GRAY": "混在 / その他",
 }
+DEFAULT_EDITABLE_COLOR_LABEL_NOTES = {
+    "NAVY": "空パレット",
+    "ORANGE": "スライス余り",
+    "TEAL": "明細不明",
+}
+COLOR_ORDER = [
+    "AUTO",
+    "RED",
+    "BLUE",
+    "YELLOW",
+    "GREEN",
+    "PINK",
+    "PURPLE",
+    "GRAY",
+    "NAVY",
+    "ORANGE",
+    "TEAL",
+    "LIME",
+    "BROWN",
+    "WHITE",
+    "BLACK",
+    "CYAN",
+    "MAGENTA",
+]
+EDITABLE_COLOR_LABEL_KEYS = [key for key in COLOR_ORDER if key not in FIXED_COLOR_LABEL_NOTES and key != "AUTO"]
 AUTO_PART_COLOR_RULES = {
     "38": ("RED", "赤", "#FF6671"),
     "39": ("BLUE", "青", "#57C1FF"),
@@ -265,6 +280,7 @@ class InventoryStore:
         self.pallets: List[PalletRecord] = []
         self.shipments: List[ShipmentRecord] = []
         self.map_notes: List[MapNoteRecord] = []
+        self.color_label_notes: Dict[str, str] = dict(DEFAULT_EDITABLE_COLOR_LABEL_NOTES)
 
     def ensure_defaults(self) -> None:
         for location in DEFAULT_LOCATIONS:
@@ -374,9 +390,14 @@ class InventoryStore:
         return f"{candidate}-{index}"
 
     def to_dict(self) -> dict:
+        color_label_notes = {
+            key: str(self.color_label_notes.get(key, DEFAULT_EDITABLE_COLOR_LABEL_NOTES.get(key, "")))
+            for key in EDITABLE_COLOR_LABEL_KEYS
+        }
         return {
             "locations": self.locations,
             "blocked_locations": self.blocked_locations,
+            "color_label_notes": color_label_notes,
             "pallets": [
                 {
                     "pallet_number": p.pallet_number,
@@ -428,6 +449,14 @@ class InventoryStore:
     @classmethod
     def from_dict(cls, payload: dict) -> "InventoryStore":
         store = cls()
+        raw_color_label_notes = payload.get("color_label_notes") or {}
+        if isinstance(raw_color_label_notes, dict):
+            store.color_label_notes = dict(DEFAULT_EDITABLE_COLOR_LABEL_NOTES)
+            store.color_label_notes.update({
+                str(key).upper(): str(value)
+                for key, value in raw_color_label_notes.items()
+                if str(key).upper() in EDITABLE_COLOR_LABEL_KEYS
+            })
         store.locations = []
         for code in payload.get("locations", []):
             location = normalize_location_code(code)
@@ -768,6 +797,28 @@ def color_label(color_key: str) -> str:
     return COLOR_PRESETS.get(color_key, COLOR_PRESETS["AUTO"])[0]
 
 
+def editable_color_label_notes(store: Optional["InventoryStore"] = None) -> Dict[str, str]:
+    notes = dict(DEFAULT_EDITABLE_COLOR_LABEL_NOTES)
+    if store is not None:
+        notes.update({
+            key: str(value)
+            for key, value in getattr(store, "color_label_notes", {}).items()
+            if key in EDITABLE_COLOR_LABEL_KEYS
+        })
+    return notes
+
+
+def color_choice_label(color_key: str, store: Optional["InventoryStore"] = None) -> str:
+    key = str(color_key or "").upper()
+    name = color_label(key)
+    if key == "AUTO":
+        return name
+    if key in FIXED_COLOR_LABEL_NOTES:
+        return f"{name} [{FIXED_COLOR_LABEL_NOTES[key]}]"
+    note = editable_color_label_notes(store).get(key, "").strip()
+    return f"{name} [{note}]" if note else name
+
+
 def auto_color_key_for_items(items: List[InventoryItemLine]) -> str:
     finishes = {(item.finish_text or "").strip().upper() for item in items}
     if finishes == {"C/C"}:
@@ -856,12 +907,14 @@ def solid_circle_icon(color_value: str) -> QIcon:
     return QIcon(pixmap)
 
 
-def populate_color_combo(combo: QComboBox, selected_key: Optional[str] = None, include_auto: bool = True) -> None:
+def populate_color_combo(combo: QComboBox, selected_key: Optional[str] = None, include_auto: bool = True, store: Optional["InventoryStore"] = None) -> None:
     combo.clear()
-    for key, (label, _) in COLOR_PRESETS.items():
+    ordered_keys = [key for key in COLOR_ORDER if key in COLOR_PRESETS]
+    ordered_keys.extend(key for key in COLOR_PRESETS if key not in ordered_keys)
+    for key in ordered_keys:
         if key == "AUTO" and not include_auto:
             continue
-        combo.addItem(color_swatch_icon(key), COLOR_CHOICE_LABELS.get(key, label), key)
+        combo.addItem(color_swatch_icon(key), color_choice_label(key, store), key)
     if selected_key is not None:
         combo.setCurrentIndex(max(0, combo.findData(selected_key)))
 
@@ -1570,10 +1623,11 @@ class RegistrationDialog(QDialog):
         self.orientation = QComboBox(); self.orientation.addItem("横向き", 0); self.orientation.addItem("縦向き", 90)
         initial_color_mode = initial_payload[3] if initial_payload is not None else "AUTO"
         initial_manual_color_key = initial_payload[4] if initial_payload is not None else "GRAY"
+        store = getattr(parent, "store", None)
         self.color_auto = QRadioButton("自動判別")
         self.color_manual = QRadioButton("手動指定")
         self.color = QComboBox()
-        populate_color_combo(self.color, initial_manual_color_key, include_auto=False)
+        populate_color_combo(self.color, initial_manual_color_key, include_auto=False, store=store)
         self.color_result = QLabel()
         self.color_preview = QLabel("      ")
         self.color_preview.setMinimumWidth(72)
@@ -2072,6 +2126,7 @@ class EditPalletDialog(QDialog):
         source_orientation = initial_payload[3] if initial_payload is not None else pallet.orientation
         source_color_mode = initial_payload[4] if initial_payload is not None else (pallet.color_mode or "AUTO")
         source_last_manual_color_key = initial_payload[5] if initial_payload is not None else (pallet.last_manual_color_key or pallet.color_key or "GRAY")
+        store = getattr(parent, "store", None)
         source_stack_order = initial_payload[6] if initial_payload is not None else pallet.stack_order
         source_items = initial_payload[7] if initial_payload is not None else pallet.items
         self.pallet_number = AutoNormalizeLineEdit(source_pallet_number, uppercase=True, remove_spaces=True)
@@ -2082,7 +2137,7 @@ class EditPalletDialog(QDialog):
         self.color_auto = QRadioButton("自動判別")
         self.color_manual = QRadioButton("手動指定")
         self.color = QComboBox()
-        populate_color_combo(self.color, source_last_manual_color_key, include_auto=False)
+        populate_color_combo(self.color, source_last_manual_color_key, include_auto=False, store=store)
         self.color_result = QLabel()
         self.color_preview = QLabel("      ")
         self.color_preview.setMinimumWidth(72)
@@ -2545,7 +2600,8 @@ class MapNoteDialog(QDialog):
         self.size_combo.addItems(VALID_SIZES)
         self.size_combo.setCurrentText("LL")
         self.color_combo = QComboBox()
-        populate_color_combo(self.color_combo, "YELLOW", include_auto=False)
+        store = getattr(parent, "store", None)
+        populate_color_combo(self.color_combo, "YELLOW", include_auto=False, store=store)
         if note is not None:
             self.text_edit.setPlainText(note.text)
             self.size_combo.setCurrentText(note.size if note.size in VALID_SIZES else "LL")
@@ -2588,6 +2644,46 @@ class MapNoteDialog(QDialog):
         super().accept()
 
 
+class ColorLabelNotesDialog(QDialog):
+    def __init__(self, store: InventoryStore, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("色説明設定")
+        self.inputs: Dict[str, QLineEdit] = {}
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+        info = QLabel("固定説明色は自動判定ルールに紐付くため変更できません。")
+        info.setWordWrap(True)
+        root.addWidget(info)
+        form = QFormLayout()
+        notes = editable_color_label_notes(store)
+        for key in COLOR_ORDER:
+            if key == "AUTO" or key not in COLOR_PRESETS:
+                continue
+            if key in FIXED_COLOR_LABEL_NOTES:
+                form.addRow(color_swatch_label(key), QLabel(color_choice_label(key, store)))
+                continue
+            edit = QLineEdit(notes.get(key, ""))
+            edit.setPlaceholderText(color_label(key))
+            edit.setMaxLength(40)
+            self.inputs[key] = edit
+            form.addRow(color_swatch_label(key), edit)
+        root.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def payload(self) -> Dict[str, str]:
+        return {key: edit.text().strip() for key, edit in self.inputs.items()}
+
+
+def color_swatch_label(color_key: str) -> QLabel:
+    label = QLabel(color_label(color_key))
+    label.setToolTip(color_label(color_key))
+    return label
+
+
 class TopMapWidget(QWidget):
     palletSelected = Signal(str)
     palletMoved = Signal(str, float, float, str)
@@ -2612,6 +2708,7 @@ class TopMapWidget(QWidget):
         self.dragging_note = None
         self.is_dragging = False
         self.drag_start_point = QPoint()
+        self.drag_candidate_label: Optional[str] = None
         self.base_cache_pixmap: Optional[QPixmap] = None
         self.base_cache_key = None
         self.base_cache_dirty = True
@@ -2854,6 +2951,14 @@ class TopMapWidget(QWidget):
             if rect.contains(point):
                 return location
         return None
+
+    def candidate_label_at(self, point: QPoint) -> Optional[str]:
+        bounds = self.scaled_bounds()
+        if bounds.width() <= 0 or bounds.height() <= 0 or not bounds.contains(point):
+            return None
+        col = min(GRID_COLUMNS - 1, max(0, int((point.x() - bounds.left()) * GRID_COLUMNS / bounds.width())))
+        row = min(GRID_ROWS - 1, max(0, int((point.y() - bounds.top()) * GRID_ROWS / bounds.height())))
+        return visible_location_code(format_location_code(col, row))
 
     def normalized_position_for_location(self, location: str, pallet: Optional[PalletRecord] = None) -> Tuple[float, float]:
         col, row = location_to_grid(location)
@@ -3132,6 +3237,22 @@ class TopMapWidget(QWidget):
                 painter.setPen(QColor("#fff8c9"))
                 painter.setFont(QFont("Yu Gothic UI", 8, QFont.Bold))
                 painter.drawText(rect.adjusted(5, 3, -5, -3), Qt.AlignTop | Qt.AlignLeft, "メモ")
+        if self.drag_candidate_label:
+            label_rect = self.drag_candidate_label_rect()
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(7, 17, 31, 190))
+            painter.drawRect(label_rect)
+            painter.setPen(QColor("#dff6ff"))
+            painter.setFont(QFont("Consolas", 11, QFont.Bold))
+            painter.drawText(label_rect, Qt.AlignCenter, self.drag_candidate_label)
+
+    def drag_candidate_label_rect(self) -> QRect:
+        text = self.drag_candidate_label or ""
+        width = max(48, 10 + len(text) * 9)
+        rect = QRect(self.drag_point.x() + 12, self.drag_point.y() - 30, width, 22)
+        rect.moveLeft(max(6, min(rect.left(), max(6, self.width() - rect.width() - 6))))
+        rect.moveTop(max(6, min(rect.top(), max(6, self.height() - rect.height() - 6))))
+        return rect
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -3245,6 +3366,8 @@ class TopMapWidget(QWidget):
                 self.drag_start_point = point
                 self.drag_offset = point - rect.topLeft()
                 self.drag_point = point
+                if self.is_dragging:
+                    self.drag_candidate_label = self.candidate_label_at(point)
                 self.hover_target = None
                 self.hover_note = None
                 self.drag_cache_pixmap = None
@@ -3267,6 +3390,8 @@ class TopMapWidget(QWidget):
                 self.drag_start_point = point
                 self.drag_offset = point - rect.topLeft()
                 self.drag_point = point
+                if self.is_dragging:
+                    self.drag_candidate_label = self.candidate_label_at(point)
                 self.hover_target = None
                 self.hover_note = None
                 self.drag_cache_pixmap = None
@@ -3293,6 +3418,13 @@ class TopMapWidget(QWidget):
         rect.moveTo(self.drag_point - self.drag_offset)
         return rect
 
+    def current_drag_update_rect(self) -> Optional[QRect]:
+        drag_rect = self.current_drag_rect()
+        label_rect = self.drag_candidate_label_rect() if self.drag_candidate_label else None
+        if drag_rect is None:
+            return label_rect
+        return drag_rect.united(label_rect) if label_rect is not None else drag_rect
+
     def request_drag_update(self, old_rect: Optional[QRect] = None, new_rect: Optional[QRect] = None) -> None:
         dirty_rect = QRect()
         for rect in (old_rect, new_rect):
@@ -3305,15 +3437,17 @@ class TopMapWidget(QWidget):
         self.update(clipped if clipped.isValid() and not clipped.isNull() else self.rect())
 
     def update_drag_at(self, point: QPoint) -> None:
-        old_drag_rect = self.current_drag_rect() if self.is_dragging else None
+        old_drag_rect = self.current_drag_update_rect() if self.is_dragging else None
         self.drag_point = point
+        if self.is_dragging:
+            self.drag_candidate_label = self.candidate_label_at(point)
         if self.is_dragging and self.dragging_note:
             self.hover_pallet = None
-            self.request_drag_update(old_drag_rect, self.current_drag_rect())
+            self.request_drag_update(old_drag_rect, self.current_drag_update_rect())
             return
         if self.is_dragging and self.dragging_pallet:
             self.hover_pallet = None
-            self.request_drag_update(old_drag_rect, self.current_drag_rect())
+            self.request_drag_update(old_drag_rect, self.current_drag_update_rect())
             return
         hit = None
         note_hit = None
@@ -3355,6 +3489,7 @@ class TopMapWidget(QWidget):
         self.drag_cache_pixmap = None
         self.drag_cache_pallet = None
         self.drag_cache_note = None
+        self.drag_candidate_label = None
         self.is_dragging = False
         self.setToolTip("")
         QToolTip.hideText()
@@ -3844,6 +3979,19 @@ class MainWindow(QMainWindow):
         ("received_dates", "入庫日", 150),
     ]
     INVENTORY_PALLET_COLUMN = 8
+    SHIPMENT_COLUMNS = [
+        ("shipped_at", "出庫日", 118),
+        ("pallet_number", "パレット番号", 130),
+        ("part_code", "品番", 88),
+        ("size", "サイズ", 70),
+        ("thickness", "厚み", 76),
+        ("finish", "加工 / 裏表", 120),
+        ("grade", "グレード", 76),
+        ("total_sheets", "総枚数", 76),
+        ("notes", "備考", 160),
+        ("location_code", "最終位置", 180),
+        ("received_date", "入庫日", 150),
+    ]
 
     def __init__(self) -> None:
         super().__init__(); self.store = load_store(); self.current_pallet_number = None; self.current_note_id = None
@@ -3852,6 +4000,8 @@ class MainWindow(QMainWindow):
         self.move_history_limit = 30
         self.inventory_sort_key = "part_code"
         self.inventory_sort_desc = False
+        self.shipment_sort_key = "shipped_at"
+        self.shipment_sort_desc = True
         self.settings = QSettings(APP_ID, "WarehouseApp")
         hidden_columns = str(self.settings.value("inventory_hidden_columns", "") or "")
         self.inventory_hidden_columns: set[int] = {
@@ -3898,21 +4048,27 @@ class MainWindow(QMainWindow):
         self.summary_label = QLabel(); self.summary_label.setStyleSheet("color:#89a4c2;"); self.summary_label.setWordWrap(True)
         self.new_button = QPushButton("新規登録"); self.new_button.clicked.connect(self.open_registration)
         self.add_note_button = QPushButton("メモ追加"); self.add_note_button.clicked.connect(self.open_map_note_dialog)
-        self.blocked_mode_button = QPushButton("置けないマス設定"); self.blocked_mode_button.setCheckable(True); self.blocked_mode_button.toggled.connect(self.set_blocked_edit_mode)
+        self.blocked_mode_button = QPushButton("置けないマス"); self.blocked_mode_button.setCheckable(True); self.blocked_mode_button.toggled.connect(self.set_blocked_edit_mode)
+        self.blocked_mode_button.setObjectName("blockedModeButton")
+        self.blocked_mode_button.setMinimumWidth(104)
         self.edit_button = QPushButton("明細編集"); self.edit_button.clicked.connect(self.edit_selected_pallet)
+        self.edit_button.setMinimumWidth(86)
         self.ship_button = QPushButton("出庫"); self.ship_button.clicked.connect(self.ship_selected_pallet)
+        self.ship_button.setMinimumWidth(64)
         self.transfer_button = QPushButton("積み替え"); self.transfer_button.clicked.connect(self.transfer_selected_pallet)
+        self.transfer_button.setMinimumWidth(76)
         self.unstack_button = QPushButton("列を解除"); self.unstack_button.clicked.connect(self.unstack_selected_pallet)
         self.stack_up_button = QPushButton("段を上げる"); self.stack_up_button.clicked.connect(lambda: self.adjust_selected_stack(1))
         self.stack_down_button = QPushButton("段を下げる"); self.stack_down_button.clicked.connect(lambda: self.adjust_selected_stack(-1))
         self.rotate_button = QPushButton("向き変更"); self.rotate_button.clicked.connect(self.rotate_selected_pallet)
+        self.color_notes_button = QPushButton("色説明設定"); self.color_notes_button.clicked.connect(self.open_color_label_notes_dialog)
         self.undo_move_button = QPushButton("戻る"); self.undo_move_button.clicked.connect(self.undo_last_move)
         self.redo_move_button = QPushButton("進む"); self.redo_move_button.clicked.connect(self.redo_last_move)
         self.undo_move_button.setObjectName("viewHistoryButton")
         self.redo_move_button.setObjectName("viewHistoryButton")
         self.undo_move_button.setToolTip("直前のパレットまたはメモ移動を戻す")
         self.redo_move_button.setToolTip("戻したパレットまたはメモ移動をやり直す")
-        self.search_input = QLineEdit(); self.search_input.setPlaceholderText("例: 39 LL 10 A"); self.search_input.textChanged.connect(self.refresh_all)
+        self.search_input = QLineEdit(); self.search_input.setPlaceholderText("例: 39 LL 10 A"); self.search_input.setClearButtonEnabled(True); self.search_input.textChanged.connect(self.refresh_all)
         self.copy_inventory_button = QPushButton("一覧コピー"); self.copy_inventory_button.clicked.connect(self.copy_inventory_table)
         self.export_inventory_button = QPushButton("棚卸データ出力"); self.export_inventory_button.clicked.connect(self.copy_inventory_summary)
         self.inventory_columns_button = QPushButton("表示項目設定"); self.inventory_columns_button.clicked.connect(self.open_inventory_column_menu)
@@ -3921,15 +4077,21 @@ class MainWindow(QMainWindow):
         self.export_button = QPushButton("Export"); self.export_button.clicked.connect(self.export_data)
         self.import_button = QPushButton("Import"); self.import_button.clicked.connect(self.import_data)
         self.clear_selection_button = QPushButton("選択解除"); self.clear_selection_button.clicked.connect(self.clear_selection)
-        self.action_buttons = [self.new_button, self.add_note_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_up_button, self.stack_down_button, self.rotate_button, self.export_button, self.import_button]
+        self.action_buttons = [self.new_button, self.add_note_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_up_button, self.stack_down_button, self.rotate_button, self.color_notes_button, self.export_button, self.import_button]
         for button in self.action_buttons: button.setMinimumHeight(40)
         self.search_input.setMinimumHeight(40)
         self.copy_inventory_button.setMinimumHeight(40)
         self.inventory_columns_button.setMinimumHeight(40)
         title_row = QHBoxLayout(); title_row.addWidget(self.title_label); title_row.addWidget(self.summary_label, 1)
         action_row = QHBoxLayout()
-        for widget in [self.new_button, self.add_note_button, self.blocked_mode_button, self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_down_button, self.stack_up_button, self.rotate_button]:
+        action_row.setSpacing(8)
+        for widget in [self.new_button, self.add_note_button, self.blocked_mode_button]:
             action_row.addWidget(widget)
+        action_row.addSpacing(18)
+        for widget in [self.edit_button, self.ship_button, self.transfer_button, self.unstack_button, self.stack_down_button, self.stack_up_button, self.rotate_button]:
+            action_row.addWidget(widget)
+        action_row.addSpacing(14)
+        action_row.addWidget(self.color_notes_button)
         action_row.addStretch(1)
         action_row.addWidget(self.export_button)
         action_row.addWidget(self.import_button)
@@ -4031,7 +4193,7 @@ class MainWindow(QMainWindow):
         self.inventory_table.currentItemChanged.connect(lambda current, _previous: QTimer.singleShot(0, lambda: self.show_table_item_popup(self.inventory_table, current)))
         self.inventory_table.itemEntered.connect(lambda item: self.show_table_item_tooltip(self.inventory_table, item))
         self.inventory_table.currentItemChanged.connect(lambda current, _previous: self.show_table_item_tooltip(self.inventory_table, current))
-        self.shipment_table = QTableWidget(0, 10); self.shipment_table.setObjectName("shipmentTable"); self.shipment_table.setHorizontalHeaderLabels(["出庫日", "パレット番号", "品名", "品数", "総枚数", "総高さ", "最終位置", "入庫日", "色", "備考"])
+        self.shipment_table = QTableWidget(0, len(self.SHIPMENT_COLUMNS)); self.shipment_table.setObjectName("shipmentTable"); self.shipment_table.setHorizontalHeaderLabels([label for _key, label, _width in self.SHIPMENT_COLUMNS])
         shipment_header = TouchFriendlyHeaderView(Qt.Horizontal, self.shipment_table)
         self.shipment_table.setHorizontalHeader(shipment_header)
         self.shipment_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.shipment_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -4048,16 +4210,9 @@ class MainWindow(QMainWindow):
         self.shipment_table.verticalHeader().setDefaultSectionSize(36)
         self.configure_table_for_touch(self.shipment_table)
         self.shipment_table.setContextMenuPolicy(Qt.CustomContextMenu); self.shipment_table.customContextMenuRequested.connect(self.open_shipment_context_menu)
-        self.shipment_table.setColumnWidth(0, 118)
-        self.shipment_table.setColumnWidth(1, 130)
-        self.shipment_table.setColumnWidth(2, 180)
-        self.shipment_table.setColumnWidth(3, 70)
-        self.shipment_table.setColumnWidth(4, 80)
-        self.shipment_table.setColumnWidth(5, 80)
-        self.shipment_table.setColumnWidth(6, 110)
-        self.shipment_table.setColumnWidth(7, 110)
-        self.shipment_table.setColumnWidth(8, 80)
-        self.shipment_table.setColumnWidth(9, 180)
+        for col, (_key, _label, width) in enumerate(self.SHIPMENT_COLUMNS):
+            self.shipment_table.setColumnWidth(col, width)
+        self.shipment_table.horizontalHeader().sectionClicked.connect(self.handle_shipment_header_click)
         self.shipment_table.cellClicked.connect(lambda row, col: self.show_table_cell_tooltip(self.shipment_table, row, col))
         self.shipment_table.cellPressed.connect(lambda row, col: QTimer.singleShot(0, lambda: self.show_table_cell_popup_if_elided(self.shipment_table, row, col)))
         self.shipment_table.itemPressed.connect(lambda item: QTimer.singleShot(0, lambda: self.show_table_item_popup(self.shipment_table, item)))
@@ -4128,8 +4283,8 @@ class MainWindow(QMainWindow):
             ("仮置きエリア（未配置）", "新規登録・メモ追加・出庫復元・列解除・積み替えで作成した空パレットは仮置きエリアへ入ります。\n上限は10個です。上限に達した場合は、先に仮置きエリア内のパレットやメモを倉庫内へ配置してください。\n仮置き中のパレットは、パレット数・明細数・総枚数・使用率にカウントしません。"),
             ("位置変更", "真上ビューでパレットやメモをドラッグ、またはタブレットでスワイプして移動します。\n2本指ピンチで拡大縮小できます。\nある程度グリッドに吸着しますが、細かい位置調整もできます。\nパレットやメモのない場所をクリックすると選択解除できます。\nパレットを右クリックすると、編集・向き変更・段操作・列解除・積み替え・出庫のメニューを表示できます。\nメモを右クリックすると撤去できます。"),
             ("積み重ね", "1ロケーション = 1スタック列です。同じマスに置いたパレットだけが同じ列として扱われます。\n隣マスや上下左右の別マスに置いた場合は積み重なりません。\n段を上げる / 下げるで同じ列の上下順を入れ替えます。\n列を解除は、選択中のパレットを1枚だけ外して仮置きエリア（未配置）へ移動します。"),
-            ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、使用率では1パレット列分としてカウントします。\n使用率の分母は通路列 B / E / F / J を除いた通常置場を基準にし、置けないマスも除外します。\n通路列にパレットを置いた場合は分子に含めるため、使用率が100%を超えることがあります。\nメモは在庫ではないため、パレット数・明細数・総枚数・高さ・出庫履歴には含めません。"),
-            ("置けないマス設定", "置けないマス設定を押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
+            ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、使用率では1パレット列分としてカウントします。\n使用率の分母は通路列 B / E / F / J を除いた通常置場を基準にします。\n置けないマスは使用済み扱いとして分子に含めます。通路列にパレットを置いた場合も分子に含めるため、使用率が100%を超えることがあります。\nメモは在庫ではないため、パレット数・明細数・総枚数・高さ・出庫履歴には含めません。"),
+            ("置けないマス", "置けないマスを押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
             ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\nパレット番号・入庫日・色・向き・明細の追加/削除/順番変更ができます。\nメモを選択している場合は、同じボタンがメモ編集になり、本文・サイズ・色を変更できます。\n厚みと枚数は行内の +/- で調整できます。厚みが 3-3.5 のような範囲入力でも、+/- を使うと最大値基準の単一値へ切り替えて調整します。"),
             ("積み替え", "積み替えでは、選択中パレットの一部枚数を既存パレットまたは空パレットへ移動できます。\n同じ明細でも自動では合算しません。\n空パレットを作る場合は仮置きエリア（未配置）に作成されます。"),
             ("出庫と復元", "出庫したパレットは真上ビューと在庫一覧から外れ、出庫一覧へ移ります。\n出庫履歴はボタンまたは出庫一覧の右クリックメニューから削除・復元できます。\n復元すると元位置ではなく仮置きエリア（未配置）へ置かれます。\nメモは出庫ではなく撤去扱いのため、出庫履歴には入りません。"),
@@ -4239,7 +4394,7 @@ class MainWindow(QMainWindow):
         is_inventory = self.tabs.currentIndex() == 2
         is_shipment = self.tabs.currentIndex() == 3
         is_help = hasattr(self, "help_tab_widget") and self.tabs.currentWidget() == self.help_tab_widget
-        self.search_input.setVisible(is_inventory)
+        self.search_input.setVisible(is_inventory or is_shipment)
         self.inventory_columns_button.setVisible(is_inventory)
         self.copy_inventory_button.setVisible(is_inventory)
         self.export_inventory_button.setVisible(is_inventory)
@@ -4453,7 +4608,7 @@ class MainWindow(QMainWindow):
         text_map = {
             self.new_button: "新規" if compact else "新規登録",
             self.add_note_button: "メモ" if compact else "メモ追加",
-            self.blocked_mode_button: "禁止マス" if compact else "置けないマス設定",
+            self.blocked_mode_button: "置けないマス",
             self.edit_button: ("メモ" if compact else "メモ編集") if self.current_note_id else ("編集" if compact else "明細編集"),
             self.ship_button: "出庫",
             self.transfer_button: "積替" if compact else "積み替え",
@@ -4461,12 +4616,17 @@ class MainWindow(QMainWindow):
             self.stack_up_button: "上げる" if compact else "段を上げる",
             self.stack_down_button: "下げる" if compact else "段を下げる",
             self.rotate_button: "向き" if compact else "向き変更",
+            self.color_notes_button: "色説明" if compact else "色説明設定",
             self.export_button: "出力" if compact else "Export",
             self.import_button: "読込" if compact else "Import",
         }
         for button in self.action_buttons:
             button.setMinimumHeight(button_height)
             button.setText(text_map.get(button, button.text()))
+        self.blocked_mode_button.setMinimumWidth(96 if compact else 104)
+        self.edit_button.setMinimumWidth(72 if compact else 86)
+        self.ship_button.setMinimumWidth(60 if compact else 64)
+        self.transfer_button.setMinimumWidth(66 if compact else 76)
         history_button_width = 64 if compact else 72
         history_button_height = 34 if compact else 38
         self.undo_move_button.setMinimumSize(history_button_width, history_button_height)
@@ -4579,9 +4739,13 @@ class MainWindow(QMainWindow):
         }
         QSpinBox::up-button:hover, QAbstractSpinBox::up-button:hover,
         QSpinBox::down-button:hover, QAbstractSpinBox::down-button:hover { background:#1d5d99; }
-        QPushButton { background:#1d5d99; color:white; border:none; border-radius:8px; padding:9px 14px; font:600 12pt 'Yu Gothic UI', 'Segoe UI'; }
+        QPushButton { background:#1d5d99; color:white; border:none; border-radius:8px; padding:8px 8px; font:600 12pt 'Yu Gothic UI', 'Segoe UI'; }
         QPushButton:hover { background:#2675c2; }
         QPushButton:checked { background:#8f3d47; }
+        QPushButton#blockedModeButton {
+            font:600 10.5pt 'Yu Gothic UI', 'Segoe UI';
+            padding:8px 7px;
+        }
         QPushButton#viewHistoryButton {
             background:#174a76;
             border:1px solid #5fa9df;
@@ -4609,7 +4773,7 @@ class MainWindow(QMainWindow):
             font:11pt 'Yu Gothic UI', 'Segoe UI';
         }
         QTableWidget#inventoryTable::item:selected {
-            background:#ffd166;
+            background:#39d98a;
             color:#07111f;
         }
         QTableWidget#inventoryTable QHeaderView::section {
@@ -4631,6 +4795,10 @@ class MainWindow(QMainWindow):
             border-right:1px solid #24384d;
             border-bottom:1px solid #24384d;
             font:11pt 'Yu Gothic UI', 'Segoe UI';
+        }
+        QTableWidget#shipmentTable::item:selected {
+            background:#ff8a80;
+            color:#07111f;
         }
         QTableWidget#shipmentTable QHeaderView::section {
             background:#102033;
@@ -4773,6 +4941,54 @@ class MainWindow(QMainWindow):
                 result.append(pallet)
         return result
 
+    def shipment_matches_keyword(self, shipment: ShipmentRecord) -> bool:
+        tokens = self.keyword_tokens()
+        if not tokens:
+            return True
+        haystacks = [
+            shipment.shipped_at.lower(),
+            shipment.pallet_number.lower(),
+            shipment.summary_text.lower(),
+            str(len(shipment.items)),
+            str(shipment.total_sheets),
+            str(shipment.estimated_height_mm),
+            shipment.location_code.lower(),
+            shipment.received_date.lower(),
+            color_label(shipment.color_key).lower(),
+            shipment_notes_text(shipment).lower(),
+        ]
+        for item in shipment.items:
+            haystacks.extend([
+                item.identifier.lower(),
+                item.part_code.lower(),
+                item.size.lower(),
+                str(item.thickness_mm).lower(),
+                item.finish_text.lower(),
+                item.grade.lower(),
+                str(item.sheet_count),
+                item.note.lower(),
+            ])
+        return all(any(token in hay for hay in haystacks) for token in tokens)
+
+    def filtered_shipments(self) -> List[ShipmentRecord]:
+        return [shipment for shipment in self.store.shipments if self.shipment_matches_keyword(shipment)]
+
+    def shipment_item_values(self, shipment: ShipmentRecord, attr: str) -> List[str]:
+        values: List[str] = []
+        for item in shipment.items:
+            value = str(getattr(item, attr, "") or "").strip()
+            if value and value not in values:
+                values.append(value)
+        return values
+
+    def shipment_item_text(self, shipment: ShipmentRecord, attr: str) -> str:
+        values = self.shipment_item_values(shipment, attr)
+        return ", ".join(values) if values else "-"
+
+    def shipment_first_item_text(self, shipment: ShipmentRecord, attr: str) -> str:
+        values = self.shipment_item_values(shipment, attr)
+        return values[0] if values else ""
+
     def refresh_all(self) -> None:
         self.store.ensure_defaults(); self.store.normalize_stacks()
         for pallet in self.store.pallets:
@@ -4876,17 +5092,24 @@ class MainWindow(QMainWindow):
             for col in range(GRID_COLUMNS)
             for row in range(GRID_ROWS)
         }
-        blocked_cells = {visible_location_code(location) for location in self.store.blocked_locations}
-        return all_cells - self.aisle_cells_for_capacity() - blocked_cells
+        return all_cells - self.aisle_cells_for_capacity()
+
+    def is_aisle_location(self, location_code: str) -> bool:
+        col, _row = location_to_grid(location_code)
+        return is_aisle_column(col)
 
     def capacity_percent(self) -> float:
         usable_cells = self.capacity_usable_cells()
-        blocked_cells = {visible_location_code(location) for location in self.store.blocked_locations}
         used_cells = {visible_location_code(pallet.location_code) for pallet in self.placed_pallets()}
-        used_cells.difference_update(blocked_cells)
+        blocked_non_aisle_cells = {
+            visible_location_code(location)
+            for location in self.store.blocked_locations
+            if not self.is_aisle_location(location)
+        }
+        occupied_cells = used_cells | blocked_non_aisle_cells
         if not usable_cells:
             return 0.0
-        return (len(used_cells) / len(usable_cells)) * 100.0
+        return (len(occupied_cells) / len(usable_cells)) * 100.0
 
     def refresh_inventory_table(self) -> None:
         rows: Dict[Tuple[str, str, str, str, str], dict] = {}
@@ -4977,20 +5200,48 @@ class MainWindow(QMainWindow):
         self.apply_inventory_column_visibility()
 
     def refresh_shipment_table(self) -> None:
-        ordered = sorted(self.store.shipments, key=lambda shipment: shipment.shipped_at, reverse=True)
+        sort_key = self.shipment_sort_key
+        reverse = self.shipment_sort_desc
+
+        def sort_value(shipment: ShipmentRecord):
+            if sort_key == "total_sheets":
+                return (shipment.total_sheets, shipment.shipped_at, shipment.pallet_number)
+            if sort_key == "pallet_number":
+                return (shipment.pallet_number, shipment.shipped_at)
+            if sort_key == "part_code":
+                return (self.shipment_first_item_text(shipment, "part_code"), shipment.pallet_number)
+            if sort_key == "size":
+                return (self.shipment_first_item_text(shipment, "size"), shipment.pallet_number)
+            if sort_key == "thickness":
+                thickness = self.shipment_first_item_text(shipment, "thickness_mm")
+                return (parse_thickness_value(thickness), thickness, shipment.pallet_number)
+            if sort_key == "finish":
+                return (self.shipment_first_item_text(shipment, "finish_text"), shipment.pallet_number)
+            if sort_key == "grade":
+                return (self.shipment_first_item_text(shipment, "grade"), shipment.pallet_number)
+            if sort_key == "location_code":
+                return (location_to_grid(shipment.location_code or ENTRY_LOCATION), shipment.pallet_number)
+            if sort_key == "received_date":
+                return (shipment.received_date or "", shipment.pallet_number)
+            if sort_key == "notes":
+                return (shipment_notes_text(shipment), shipment.pallet_number)
+            return (shipment.shipped_at, shipment.pallet_number)
+
+        ordered = sorted(self.filtered_shipments(), key=sort_value, reverse=reverse)
         self.shipment_table.setRowCount(len(ordered))
         for row_index, shipment in enumerate(ordered):
             values = [
                 shipment.shipped_at,
                 shipment.pallet_number,
-                shipment.summary_text,
-                str(len(shipment.items)),
+                self.shipment_item_text(shipment, "part_code"),
+                self.shipment_item_text(shipment, "size"),
+                self.shipment_item_text(shipment, "thickness_mm"),
+                self.shipment_item_text(shipment, "finish_text"),
+                self.shipment_item_text(shipment, "grade"),
                 str(shipment.total_sheets),
-                str(shipment.estimated_height_mm),
+                shipment_notes_text(shipment),
                 shipment.location_code or "-",
                 shipment.received_date or "-",
-                color_label(shipment.color_key),
-                shipment_notes_text(shipment),
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -5296,6 +5547,19 @@ class MainWindow(QMainWindow):
             self.inventory_sort_desc = False
         self.refresh_inventory_table()
 
+    def handle_shipment_header_click(self, column: int) -> None:
+        if column < 0 or column >= len(self.SHIPMENT_COLUMNS):
+            return
+        target = self.SHIPMENT_COLUMNS[column][0]
+        if not target:
+            return
+        if self.shipment_sort_key == target:
+            self.shipment_sort_desc = not self.shipment_sort_desc
+        else:
+            self.shipment_sort_key = target
+            self.shipment_sort_desc = False
+        self.refresh_shipment_table()
+
     def select_pallet_from_inventory_table(self, row: int, _column: int) -> None:
         item = self.inventory_table.item(row, self.INVENTORY_PALLET_COLUMN)
         pallet_numbers = item.data(Qt.UserRole) if item is not None else None
@@ -5323,6 +5587,20 @@ class MainWindow(QMainWindow):
         self.top_map.update()
         self.iso_map.update()
 
+    def next_pallet_after_shipping(self, location_code: str, previous_stack_order: int) -> Optional[str]:
+        remaining = [
+            pallet
+            for pallet in self.store.pallets
+            if normalize_location_code(pallet.location_code) == normalize_location_code(location_code)
+            and not self.store.is_entry_waiting_pallet(pallet)
+        ]
+        if not remaining:
+            return None
+        remaining.sort(key=lambda item: (item.stack_order, item.updated_at, item.pallet_number))
+        same_or_next = [item for item in remaining if item.stack_order >= previous_stack_order]
+        target = same_or_next[0] if same_or_next else remaining[-1]
+        return target.pallet_number
+
     def ship_selected_pallet(self) -> None:
         pallet = self.store.get_pallet(self.current_pallet_number or "")
         if not pallet:
@@ -5330,6 +5608,8 @@ class MainWindow(QMainWindow):
             return
         if QMessageBox.question(self, "出庫", f"パレット {pallet.pallet_number} を出庫して倉庫表示から外しますか？", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
+        shipped_location = normalize_location_code(pallet.location_code)
+        shipped_stack_order = pallet.stack_order
         shipment = ShipmentRecord(
             pallet_number=pallet.pallet_number,
             location_code=pallet.location_code,
@@ -5345,7 +5625,11 @@ class MainWindow(QMainWindow):
         self.store.shipments.append(shipment)
         self.store.pallets = [item for item in self.store.pallets if item.pallet_number != pallet.pallet_number]
         self.normalize_store_stacks()
-        self.clear_selection()
+        next_pallet_number = self.next_pallet_after_shipping(shipped_location, shipped_stack_order)
+        if next_pallet_number:
+            self.select_pallet(next_pallet_number)
+        else:
+            self.clear_selection()
         self.mark_store_dirty()
         self.refresh_all()
 
@@ -5614,6 +5898,16 @@ class MainWindow(QMainWindow):
                 continue
             return self.top_map.clamped_normalized_for_note(note, slot_x, slot_y)
         raise ValueError("仮置きエリア（未配置）に空きがありません。\n先に仮置きエリア内のメモまたはパレットを配置してください。")
+
+    def open_color_label_notes_dialog(self) -> None:
+        dialog = ColorLabelNotesDialog(self.store, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        notes = dict(DEFAULT_EDITABLE_COLOR_LABEL_NOTES)
+        notes.update({key: value for key, value in dialog.payload().items() if key in EDITABLE_COLOR_LABEL_KEYS})
+        self.store.color_label_notes = notes
+        self.mark_store_dirty()
+        self.refresh_all()
 
     def pallet_move_states(self, pallet_numbers) -> Tuple[PalletMoveState, ...]:
         states = []
