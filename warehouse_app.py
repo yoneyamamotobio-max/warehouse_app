@@ -1575,7 +1575,13 @@ class RepeatStepController(QObject):
 
 
 class RegistrationDialog(QDialog):
-    def __init__(self, locations: List[str], parent: Optional[QWidget] = None, initial_payload: Optional[Tuple[str, str, int, str, str, List[InventoryItemLine]]] = None) -> None:
+    def __init__(
+        self,
+        locations: List[str],
+        parent: Optional[QWidget] = None,
+        initial_payload: Optional[Tuple[str, str, int, str, str, List[InventoryItemLine]]] = None,
+        initial_item: Optional[InventoryItemLine] = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("新規登録")
         self.setSizeGripEnabled(True)
@@ -1586,6 +1592,7 @@ class RegistrationDialog(QDialog):
         else:
             self.resize(1040, 700)
         self.items: List[InventoryItemLine] = list(initial_payload[5]) if initial_payload is not None else []
+        seed_item = initial_item if initial_payload is None else None
         self.editing_row: Optional[int] = None
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -1658,14 +1665,20 @@ class RegistrationDialog(QDialog):
         box = QFrame(); grid = QGridLayout(box)
         self.step_button_groups: List[Tuple[QPushButton, QPushButton, object]] = []
         self.step_repeat_controllers: List[RepeatStepController] = []
-        self.part_code = AutoNormalizeClearOnFocusLineEdit("39", uppercase=True, remove_spaces=True)
+        initial_part_code = seed_item.part_code if seed_item is not None else "39"
+        initial_size = seed_item.size if seed_item is not None and seed_item.size in VALID_SIZES else "LL"
+        initial_thickness = seed_item.thickness_mm if seed_item is not None else "10"
+        initial_finish = seed_item.finish_text if seed_item is not None else "S/S"
+        initial_grade = seed_item.grade if seed_item is not None else "A"
+        initial_sheet_count = str(seed_item.sheet_count) if seed_item is not None else "80"
+        self.part_code = AutoNormalizeClearOnFocusLineEdit(initial_part_code, uppercase=True, remove_spaces=True)
         self.size = QComboBox(); self.size.addItems(VALID_SIZES)
-        self.size.setCurrentText("LL")
-        self.thickness = ThicknessLineEdit("10")
-        self.finish = FinishClearOnFocusLineEdit("S/S")
+        self.size.setCurrentText(initial_size)
+        self.thickness = ThicknessLineEdit(initial_thickness)
+        self.finish = FinishClearOnFocusLineEdit(initial_finish)
         self.grade = QComboBox(); self.grade.setEditable(True); self.grade.addItems(VALID_GRADES)
-        self.grade.setCurrentText("A")
-        self.sheet_count = CountLineEdit("80")
+        self.grade.setCurrentText(initial_grade)
+        self.sheet_count = CountLineEdit(initial_sheet_count)
         thickness_control = self.create_step_control(self.thickness, lambda: self.thickness.step_by(1), lambda: self.thickness.step_by(-1), lambda: self.thickness.can_step())
         sheet_control = self.create_step_control(self.sheet_count, lambda: self.sheet_count.step_by(1, minimum=0, maximum=600, fallback=80), lambda: self.sheet_count.step_by(-1, minimum=0, maximum=600, fallback=80), lambda: True)
         self.note = QLineEdit(); self.note.setMaxLength(20)
@@ -3995,6 +4008,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__(); self.store = load_store(); self.current_pallet_number = None; self.current_note_id = None
+        self.last_registration_item_cache: Optional[InventoryItemLine] = None
         self.move_undo_stack: List[MoveAction] = []
         self.move_redo_stack: List[MoveAction] = []
         self.move_history_limit = 30
@@ -4239,60 +4253,22 @@ class MainWindow(QMainWindow):
         layout.setSpacing(14)
 
         sections = [
-            (
-                "入力ルール",
-                """
-                <div style="font-size:11pt; line-height:1.7;">
-                  <div style="font-weight:700; color:#7fd0ff; font-size:13pt; margin-bottom:6px;">入力ルール</div>
-                  <div style="margin-bottom:10px;">全角で入力しても、自動で半角へ変換される項目があります。備考以外は保存時にルールチェックが入ります。</div>
-
-                  <div style="font-weight:700; color:#ffe28a; margin:8px 0 4px 0;">■ 品番・パレット番号</div>
-                  <div>・全角英数字は自動で半角へ変換</div>
-                  <div>・英字は大文字へ変換</div>
-                  <div>・日本語は入力不可</div>
-                  <div style="margin-top:4px; color:#b9d8f5;">例: <code>３９</code> → <code>39</code> / <code>ｐ００１</code> → <code>P001</code></div>
-                  <div style="color:#ffb0b7;">NG: <code>テスト</code> / <code>品番39</code></div>
-
-                  <div style="font-weight:700; color:#ffe28a; margin:10px 0 4px 0;">■ 加工 / 裏表</div>
-                  <div>・日本語OK</div>
-                  <div>・英数字は半角大文字へ変換</div>
-                  <div>・<code>￥</code> <code>\\</code> <code>。</code> <code>？</code> <code>?</code> は <code>/</code> に変換</div>
-                  <div style="margin-top:4px; color:#b9d8f5;">例: <code>ｓ／ｓ</code> → <code>S/S</code> / <code>Ｃ￥Ｃ</code> → <code>C/C</code> / <code>Ｓ。Ｓ</code> → <code>S/S</code> / <code>エンボスｓ／ｓ</code> → <code>エンボスS/S</code></div>
-
-                  <div style="font-weight:700; color:#ffe28a; margin:10px 0 4px 0;">■ 厚み(mm)</div>
-                  <div>・全角数字は半角へ変換</div>
-                  <div>・<code>、</code> <code>・</code> <code>,</code> は小数点として扱う</div>
-                  <div>・<code>3-3.5</code> や <code>3~3.5</code> の範囲表記OK</div>
-                  <div>・高さ計算は最大値を使用</div>
-                  <div style="margin-top:4px; color:#b9d8f5;">例: <code>５、５</code> → <code>5.5</code> / <code>３－３．５</code> → <code>3-3.5</code></div>
-                  <div style="color:#ffb0b7;">NG: <code>約3.5</code> / <code>3mm</code> / <code>あいうえお</code></div>
-
-                  <div style="font-weight:700; color:#ffe28a; margin:10px 0 4px 0;">■ 枚数</div>
-                  <div>・全角数字は半角へ変換</div>
-                  <div>・数字のみ入力可能</div>
-                  <div style="margin-top:4px; color:#b9d8f5;">例: <code>８０</code> → <code>80</code></div>
-                  <div style="color:#ffb0b7;">NG: <code>80枚</code> / <code>abc</code></div>
-
-                  <div style="font-weight:700; color:#ffe28a; margin:10px 0 4px 0;">■ 備考</div>
-                  <div>・日本語OK</div>
-                  <div>・20文字以内</div>
-                </div>
-                """,
-            ),
-            ("基本操作", "1. 新規登録でパレット番号・入庫日・明細を入力\n2. 明細を追加してから OK で登録\n3. 登録直後は仮置きエリア（未配置）に入るため、真上ビューで保管場所へドラッグ移動\n4. 地図上の注釈はメモ追加から登録できます。メモは在庫ではなく地図メモとして扱います。"),
-            ("仮置きエリア（未配置）", "新規登録・メモ追加・出庫復元・列解除・積み替えで作成した空パレットは仮置きエリアへ入ります。\n上限は10個です。上限に達した場合は、先に仮置きエリア内のパレットやメモを倉庫内へ配置してください。\n仮置き中のパレットは、パレット数・明細数・総枚数・使用率にカウントしません。"),
-            ("位置変更", "真上ビューでパレットやメモをドラッグ、またはタブレットでスワイプして移動します。\n2本指ピンチで拡大縮小できます。\nある程度グリッドに吸着しますが、細かい位置調整もできます。\nパレットやメモのない場所をクリックすると選択解除できます。\nパレットを右クリックすると、編集・向き変更・段操作・列解除・積み替え・出庫のメニューを表示できます。\nメモを右クリックすると撤去できます。"),
-            ("積み重ね", "1ロケーション = 1スタック列です。同じマスに置いたパレットだけが同じ列として扱われます。\n隣マスや上下左右の別マスに置いた場合は積み重なりません。\n段を上げる / 下げるで同じ列の上下順を入れ替えます。\n列を解除は、選択中のパレットを1枚だけ外して仮置きエリア（未配置）へ移動します。"),
-            ("集計ルール", "上部のパレット・明細・総枚数は、倉庫内に配置済みのパレットだけを集計します。\n使用率も仮置き中は除外します。\n同じロケーションに積み重なっている場合、使用率では1パレット列分としてカウントします。\n使用率の分母は通路列 B / E / F / J を除いた通常置場を基準にします。\n置けないマスは使用済み扱いとして分子に含めます。通路列にパレットを置いた場合も分子に含めるため、使用率が100%を超えることがあります。\nメモは在庫ではないため、パレット数・明細数・総枚数・高さ・出庫履歴には含めません。"),
-            ("置けないマス", "置けないマスを押してから真上ビューのマスをクリックすると、そのマスを使用禁止にできます。\n禁止マスは真上ビューと45度ビューの両方で表示されます。\n既にパレットが置いてあるマスは設定できません。"),
-            ("明細編集", "パレットをダブルクリック、または明細編集ボタンで編集できます。\nパレット番号・入庫日・色・向き・明細の追加/削除/順番変更ができます。\nメモを選択している場合は、同じボタンがメモ編集になり、本文・サイズ・色を変更できます。\n厚みと枚数は行内の +/- で調整できます。厚みが 3-3.5 のような範囲入力でも、+/- を使うと最大値基準の単一値へ切り替えて調整します。"),
-            ("積み替え", "積み替えでは、選択中パレットの一部枚数を既存パレットまたは空パレットへ移動できます。\n同じ明細でも自動では合算しません。\n空パレットを作る場合は仮置きエリア（未配置）に作成されます。"),
-            ("出庫と復元", "出庫したパレットは真上ビューと在庫一覧から外れ、出庫一覧へ移ります。\n出庫履歴はボタンまたは出庫一覧の右クリックメニューから削除・復元できます。\n復元すると元位置ではなく仮置きエリア（未配置）へ置かれます。\nメモは出庫ではなく撤去扱いのため、出庫履歴には入りません。"),
-            ("45度ビュー", "45度ビューは立体確認用です。パレット移動は真上ビューで行います。\n視点90°で向きを切り替え、ドラッグまたはタブレットの1本指操作で表示位置を動かせます。\n2本指ピンチで拡大縮小できます。\n積み重ねは真上に積まれた状態で表示します。"),
-            ("在庫一覧", "在庫一覧では列ヘッダーをクリックして並び替えできます。\n検索はスペース区切り AND 検索です。例: 39 LL 10 A\n行をダブルクリックすると真上ビューへ切り替わり、該当パレットを強調表示します。まとめ行に複数パレットが含まれる場合は、該当パレットをまとめて強調表示します。\n一覧コピーでExcelへ貼り付けでき、棚卸データ出力では同じ品番・サイズ・厚み・加工・グレードを合計します。"),
-            ("色の見方", "自動判別は明細内容で色を決めます。\nC/Cのみは紫、#38は赤、#39は青、#45は緑、#50は桃、#40は黄、混在やその他はグレーです。\n新規登録・編集では自動判別と手動指定を切り替えられます。"),
-            ("保存と共有", "編集確定・登録確定・メモ追加・メモ編集・移動完了・積み替え確定・出庫確定など、データ変更が確定した時に保存します。\n保存に失敗した場合は再試行または別名保存を選べます。\n日次バックアップは backups フォルダへ自動保存されます。ファイル名は inventory-data-YYYY-MM-DD.json 形式で、同じ日は1回だけ作成し、その日最初に保存する前の状態を残します。\nデータ共有は Export / Import を使います。Import は現在データを上書きするため確認が出ます。"),
-            ("困った時", "位置や段順が変に見える場合は、まず真上ビューでロケーションと積み段を確認してください。\nデータ読込エラーや保存エラーは store-error.log に記録されます。\n本体とバックアップの両方が読めない場合は、復旧ダイアログを表示して起動を停止します。"),
+            ("画面の見方", "・真上ビューと45度ビューを切り替えられます。\n・真上ビューは配置確認、選択、ドラッグ移動に使います。\n・45度ビューは積み重なりや高さ方向の確認に使います。\n・使用率は通路列 B / E / F / J を除いた通常置場を基準に計算します。\n・通路以外の通常置場が埋まると100%です。\n・通路列にパレットを置くと100%を超えます。\n・置けないマスは使用済み扱いで使用率に含まれます。\n・メモは在庫ではないため、使用率や高さ計算には含まれません。"),
+            ("通路列", "・B / E / F / J は通路列です。\n・列ラベルは B(通路) のように表示されます。\n・通路にも配置はできますが、本来置きたくない場所として扱います。\n・通路列は置けないマス設定とは別管理です。"),
+            ("新規登録", "・新規登録から通常パレットを登録します。\n・パレット番号、入庫日、向き、色、明細を入力します。\n・明細は品番、サイズ、厚み、加工 / 裏表、グレード、枚数を入力します。\n・明細を追加してからOKを押すと登録されます。\n・登録後は未配置エリアに置かれます。\n・真上ビューでドラッグして実際の場所へ配置します。\n・アプリ起動中は、直前に新規登録した最後の明細が次回登録時の初期値になります。\n・アプリ再起動後は標準値 #39 / LL / 10 / S/S / A / 80 に戻ります。\n・備考、パレット番号、入庫日、場所、登録済み明細リストは引き継ぎません。"),
+            ("入力ルール", "・品番とパレット番号は、全角英数字を半角へ変換し、英字を大文字へ変換します。\n・加工 / 裏表は日本語も入力できます。英数字は半角大文字へ変換します。\n・加工 / 裏表の ￥、\\、。、？、? は / に変換します。\n・厚みは 3-3.5 や 3~3.5 のような範囲表記も入力できます。\n・高さ計算では厚み範囲の最大値を使います。\n・枚数は数字のみ入力できます。\n・備考は日本語も入力できます。"),
+            ("メモ追加", "・メモ追加から地図メモを作成できます。\n・空パレット、明細不明、スライス余り、一時置き、確認待ちなど、通常明細にしづらいものに使います。\n・メモは在庫集計、高さ計算、使用率、出庫履歴には含まれません。\n・メモ本文は複数行入力できます。\n・本文の1行目がタイトルとして地図や詳細表示に出ます。\n・メモは通常パレットと重ねて置けます。\n・メモを削除する場合は出庫ではなく撤去します。"),
+            ("移動", "・真上ビューでパレットやメモをドラッグして移動します。\n・ドラッグ中は A01、B12 のような現在の候補座標が表示されます。\n・同じマスに置くと段積みになります。\n・段積みは右上方向に少しずらして表示されます。\n・間違えて移動した場合は戻るで直前の移動を戻せます。\n・進むで戻した移動をやり直せます。\n・戻る / 進むは、アプリ起動中の真上ビューでの移動操作だけが対象です。\n・新規登録、編集、出庫、削除、撤去は戻る / 進むの対象外です。"),
+            ("選択・編集", "・パレットをクリックすると内容が表示されます。\n・メモをクリックするとメモ内容が表示されます。\n・何もない場所をクリックすると選択を解除できます。\n・パレットは明細編集で編集できます。\n・メモを選択している場合は、同じボタンでメモを編集できます。\n・パレットやメモはダブルクリックでも編集できます。\n・右クリックメニューから編集、出庫、撤去などの操作を選べる項目があります。"),
+            ("出庫", "・パレットを選択して出庫できます。\n・出庫したパレットは在庫から外れ、出庫一覧へ移ります。\n・積み重ねパレットを出庫した後、同じマスに残りがあれば自動で同じマスのパレットを選択します。\n・同じ場所のパレットを連続して出庫しやすくしています。\n・メモは出庫対象ではありません。削除する場合は撤去します。"),
+            ("在庫一覧", "・現在登録されている在庫パレットを一覧で確認できます。\n・検索できます。表示項目に対して部分一致で探せます。\n・各項目の見出しを押すと並び替えできます。\n・タブレットではスクロールバーやスワイプで操作できます。\n・行上のスワイプで複数行を選択できます。\n・選択した在庫は編集、出庫、地図上の選択対象になります。\n・行をダブルクリックすると、該当パレットを地図上で確認できます。"),
+            ("在庫一覧の出力", "■ 一覧コピー\n・在庫一覧に表示されている内容をそのままクリップボードへコピーします。\n・Excelへの貼り付けや内容確認に使います。\n・同じアイテムの数量集計は行いません。\n・一覧表示に近い形式でコピーします。\n\n■ 棚卸データ出力\n・棚卸表用の集計データをクリップボードへコピーします。\n・同じアイテムは数量を合計してまとめます。\n・棚卸表へ貼り付ける用途です。\n・一覧コピーとは用途が異なります。"),
+            ("出庫一覧", "・出庫済みの履歴を確認できます。\n・出庫日は先頭列に表示されます。\n・検索できます。表示項目に対して部分一致で探せます。\n・各項目の見出しを押すと並び替えできます。\n・操作感は在庫一覧とほぼ同じです。\n・在庫一覧と出庫一覧は選択色が異なるため見分けやすくなっています。\n・出庫履歴は復元や削除ができます。復元したパレットは未配置エリアに置かれます。"),
+            ("置けないマス", "・置けないマスから配置できない場所を設定できます。\n・設備、柱、作業スペースなどを登録する用途です。\n・使用率計算では使用済み扱いになります。\n・通路列とは別管理です。\n・通路列を置けないマスにしても、通路列分は使用率の分母にも分子にも入りません。"),
+            ("色説明設定", "■ 固定説明色\n・赤 [#38]\n・青 [#39]\n・黄 [#40]\n・緑 [#45]\n・桃 [#50]\n・紫 [C/C]\n・その他 [混在 / その他]\n・上記は自動判定や運用ルールと関係するため変更できません。\n\n■ 編集可能色\n・紺 [空パレット]\n・橙 [スライス余り]\n・青緑 [明細不明]\n・その他の色\n・色説明設定から説明を変更できます。\n・説明を空欄にすると色名のみ表示されます。\n・説明はパレット登録 / 編集とメモ登録 / 編集の色選択に反映されます。"),
+            ("Export / Import", "・Export はデータファイルを書き出す機能です。\n・Import は書き出したデータを読み込む機能です。\n・普段の運用では基本的に使用しません。\n・PC移行、バックアップ、データ復元時などに利用します。\n・Import は現在のデータを変更するため注意して使用してください。"),
+            ("保存とバックアップ", "・登録、編集、メモ追加、メモ編集、移動完了、出庫確定、撤去など、データ変更が確定した時に保存します。\n・ドラッグ中は保存せず、移動確定後に保存します。\n・保存に失敗した場合は再試行または別名保存を選べます。\n・日次バックアップは backups フォルダへ自動保存されます。"),
+            ("困った時", "・位置や段順が変に見える場合は、まず真上ビューでロケーションと積み段を確認してください。\n・直前の移動ミスは戻るで戻せます。\n・データ読込エラーや保存エラーは store-error.log に記録されます。\n・本体データとバックアップの両方が読めない場合は、復旧ダイアログを表示して起動を停止します。"),
         ]
 
         title = QLabel("操作ヘルプ")
@@ -6298,7 +6274,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "積み替え", f"同名ありのため、空パレット番号は `{target.pallet_number}` で登録しました。")
 
     def open_registration(self) -> None:
-        dialog = RegistrationDialog(self.store.locations, self)
+        dialog = RegistrationDialog(self.store.locations, self, initial_item=self.last_registration_item_cache)
         if dialog.exec() != QDialog.Accepted: return
         payload = dialog.payload()
         if payload is None: return
@@ -6317,6 +6293,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "新規登録", str(exc))
             return
         self.store.pallets.append(pallet)
+        if items:
+            cached_item = clone_item(items[-1])
+            cached_item.note = ""
+            self.last_registration_item_cache = cached_item
         self.normalize_store_stacks()
         self.select_pallet(pallet_number); self.mark_store_dirty(); self.refresh_all()
         if pallet_number != requested_number:
