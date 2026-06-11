@@ -4221,6 +4221,7 @@ class MainWindow(QMainWindow):
         self.redo_move_button.setToolTip("戻したパレットまたはメモ移動をやり直す")
         self.search_input = QLineEdit(); self.search_input.setPlaceholderText("例: 39 LL 10 A"); self.search_input.setClearButtonEnabled(True); self.search_input.textChanged.connect(self.refresh_all)
         self.copy_inventory_button = QPushButton("一覧コピー"); self.copy_inventory_button.clicked.connect(self.copy_inventory_table)
+        self.copy_shipment_button = QPushButton("一覧コピー"); self.copy_shipment_button.clicked.connect(self.copy_shipment_table)
         self.export_inventory_button = QPushButton("棚卸データ出力"); self.export_inventory_button.clicked.connect(self.copy_inventory_summary)
         self.inventory_columns_button = QPushButton("表示項目設定"); self.inventory_columns_button.clicked.connect(self.open_inventory_column_menu)
         self.restore_shipment_button = QPushButton("復元"); self.restore_shipment_button.clicked.connect(self.restore_selected_shipments)
@@ -4232,6 +4233,7 @@ class MainWindow(QMainWindow):
         for button in self.action_buttons: button.setMinimumHeight(40)
         self.search_input.setMinimumHeight(40)
         self.copy_inventory_button.setMinimumHeight(40)
+        self.copy_shipment_button.setMinimumHeight(40)
         self.inventory_columns_button.setMinimumHeight(40)
         title_row = QHBoxLayout(); title_row.addWidget(self.title_label); title_row.addWidget(self.summary_label, 1)
         action_row = QHBoxLayout()
@@ -4246,7 +4248,7 @@ class MainWindow(QMainWindow):
         action_row.addStretch(1)
         action_row.addWidget(self.export_button)
         action_row.addWidget(self.import_button)
-        utility_row = QHBoxLayout(); utility_row.addWidget(self.search_input, 1); utility_row.addWidget(self.inventory_columns_button); utility_row.addWidget(self.copy_inventory_button); utility_row.addWidget(self.export_inventory_button); utility_row.addWidget(self.restore_shipment_button); utility_row.addWidget(self.delete_shipment_button)
+        utility_row = QHBoxLayout(); utility_row.addWidget(self.search_input, 1); utility_row.addWidget(self.inventory_columns_button); utility_row.addWidget(self.copy_inventory_button); utility_row.addWidget(self.copy_shipment_button); utility_row.addWidget(self.export_inventory_button); utility_row.addWidget(self.restore_shipment_button); utility_row.addWidget(self.delete_shipment_button)
         header_shell = QVBoxLayout(); header_shell.setSpacing(8); header_shell.addLayout(title_row); header_shell.addLayout(action_row); header_shell.addLayout(utility_row); root.addLayout(header_shell)
         self.map_container = QWidget(); root.addWidget(self.map_container, 1)
         map_layout = QVBoxLayout(self.map_container); map_layout.setContentsMargins(0, 0, 0, 0)
@@ -4400,7 +4402,7 @@ class MainWindow(QMainWindow):
             ("出庫", "・パレットを選択して出庫できます。\n・出庫したパレットは在庫から外れ、出庫一覧へ移ります。\n・積み重ねパレットを出庫した後、同じマスに残りがあれば自動で同じマスのパレットを選択します。\n・同じ場所のパレットを連続して出庫しやすくしています。\n・メモは出庫対象ではありません。削除する場合は撤去します。"),
             ("在庫一覧", "・現在登録されている在庫パレットを一覧で確認できます。\n・Lotは備考の前の独立した列に表示されます。\n・検索できます。Lotを含む表示項目に対して部分一致で探せます。\n・各項目の見出しを押すと並び替えできます。\n・品番等が同じでもLotが異なる明細は別在庫として表示されます。\n・タブレットではスクロールバーやスワイプで操作できます。\n・行上のスワイプで複数行を選択できます。\n・選択した在庫は編集、出庫、地図上の選択対象になります。\n・行をダブルクリックすると、該当パレットを地図上で確認できます。"),
             ("在庫一覧の出力", "■ 一覧コピー\n・在庫一覧に表示されている内容をそのままクリップボードへコピーします。\n・Excelへの貼り付けや内容確認に使います。\n・同じアイテムの数量集計は行いません。\n・一覧表示に近い形式でコピーします。\n\n■ 棚卸データ出力\n・棚卸表用の集計データをクリップボードへコピーします。\n・同じアイテムは数量を合計してまとめます。\n・棚卸表へ貼り付ける用途です。\n・一覧コピーとは用途が異なります。"),
-            ("出庫一覧", "・出庫済みの履歴を確認できます。\n・出庫日は先頭列に表示されます。\n・検索できます。表示項目に対して部分一致で探せます。\n・各項目の見出しを押すと並び替えできます。\n・操作感は在庫一覧とほぼ同じです。\n・在庫一覧と出庫一覧は選択色が異なるため見分けやすくなっています。\n・出庫履歴は復元や削除ができます。復元したパレットは未配置エリアに置かれます。"),
+            ("出庫一覧", "・出庫済みの履歴を確認できます。\n・出庫日は先頭列に表示されます。\n・検索できます。表示項目に対して部分一致で探せます。\n・各項目の見出しを押すと並び替えできます。\n・一覧コピーで、現在表示中の出庫一覧をヘッダー付きのタブ区切り形式でコピーできます。\n・Lotは備考とは別の独立した列でコピーされます。\n・操作感は在庫一覧とほぼ同じです。\n・在庫一覧と出庫一覧は選択色が異なるため見分けやすくなっています。\n・出庫履歴は復元や削除ができます。復元したパレットは未配置エリアに置かれます。"),
             ("置けないマス", "・置けないマスから配置できない場所を設定できます。\n・設備、柱、作業スペースなどを登録する用途です。\n・使用率計算では使用済み扱いになります。\n・通路列とは別管理です。\n・通路列を置けないマスにしても、通路列分は使用率の分母にも分子にも入りません。"),
             ("色説明設定", "■ 固定説明色\n・赤 [#38]\n・青 [#39]\n・黄 [#40]\n・緑 [#45]\n・桃 [#50]\n・紫 [C/C]\n・その他 [混在 / その他]\n・上記は自動判定や運用ルールと関係するため変更できません。\n\n■ 編集可能色\n・紺 [空パレット]\n・橙 [スライス余り]\n・青緑 [明細不明]\n・その他の色\n・色説明設定から説明を変更できます。\n・説明を空欄にすると色名のみ表示されます。\n・説明はパレット登録 / 編集とメモ登録 / 編集の色選択に反映されます。"),
             ("Export / Import", "・Export はデータファイルを書き出す機能です。\n・Import は書き出したデータを読み込む機能です。\n・普段の運用では基本的に使用しません。\n・PC移行、バックアップ、データ復元時などに利用します。\n・Import は現在のデータを変更するため注意して使用してください。"),
@@ -4510,6 +4512,7 @@ class MainWindow(QMainWindow):
         self.search_input.setVisible(is_inventory or is_shipment)
         self.inventory_columns_button.setVisible(is_inventory)
         self.copy_inventory_button.setVisible(is_inventory)
+        self.copy_shipment_button.setVisible(is_shipment)
         self.export_inventory_button.setVisible(is_inventory)
         self.restore_shipment_button.setVisible(is_shipment)
         self.delete_shipment_button.setVisible(is_shipment)
@@ -4747,11 +4750,13 @@ class MainWindow(QMainWindow):
         self.search_input.setMinimumHeight(max(combo_height, 40))
         self.inventory_columns_button.setMinimumHeight(combo_height)
         self.copy_inventory_button.setMinimumHeight(combo_height)
+        self.copy_shipment_button.setMinimumHeight(combo_height)
         self.export_inventory_button.setMinimumHeight(combo_height)
         self.restore_shipment_button.setMinimumHeight(combo_height)
         self.delete_shipment_button.setMinimumHeight(combo_height)
         self.inventory_columns_button.setText("項目" if compact else "表示項目設定")
         self.copy_inventory_button.setText("コピー" if compact else "一覧コピー")
+        self.copy_shipment_button.setText("コピー" if compact else "一覧コピー")
         self.export_inventory_button.setText("棚卸出力" if compact else "棚卸データ出力")
         self.search_input.setPlaceholderText("検索" if narrow else "例: 39 LL 10 A")
         if hasattr(self, "iso_rotate_button") and hasattr(self, "iso_map"):
@@ -5488,26 +5493,32 @@ class MainWindow(QMainWindow):
         column = index.column()
         QTimer.singleShot(0, lambda table=table, row=row, column=column: self.show_table_cell_popup(table, row, column))
 
-    def copy_inventory_table(self) -> None:
-        if self.inventory_table.rowCount() == 0:
+    def copy_table_to_clipboard(self, table: QTableWidget, skip_hidden_columns: bool = False) -> None:
+        if table.rowCount() == 0:
             QApplication.clipboard().setText("")
             return
         headers = []
-        for col in range(self.inventory_table.columnCount()):
-            if self.inventory_table.isColumnHidden(col):
+        visible_columns = []
+        for col in range(table.columnCount()):
+            if skip_hidden_columns and table.isColumnHidden(col):
                 continue
-            item = self.inventory_table.horizontalHeaderItem(col)
+            visible_columns.append(col)
+            item = table.horizontalHeaderItem(col)
             headers.append(item.text() if item else "")
         lines = ["\t".join(headers)]
-        for row in range(self.inventory_table.rowCount()):
+        for row in range(table.rowCount()):
             values = []
-            for col in range(self.inventory_table.columnCount()):
-                if self.inventory_table.isColumnHidden(col):
-                    continue
-                item = self.inventory_table.item(row, col)
+            for col in visible_columns:
+                item = table.item(row, col)
                 values.append(item.text() if item else "")
             lines.append("\t".join(values))
         QApplication.clipboard().setText("\n".join(lines))
+
+    def copy_inventory_table(self) -> None:
+        self.copy_table_to_clipboard(self.inventory_table, skip_hidden_columns=True)
+
+    def copy_shipment_table(self) -> None:
+        self.copy_table_to_clipboard(self.shipment_table)
 
     def copy_inventory_summary(self) -> None:
         rows: Dict[Tuple[str, str, str, str, str, str], dict] = {}
