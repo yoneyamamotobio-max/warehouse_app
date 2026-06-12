@@ -1617,7 +1617,53 @@ class RepeatStepController(QObject):
         return super().eventFilter(source, event)
 
 
-class RegistrationDialog(QDialog):
+class RememberedWindowDialog(QDialog):
+    def configure_window_persistence(self, settings_prefix: str) -> None:
+        self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
+        self.window_settings = QSettings(APP_ID, "WarehouseApp")
+        self.window_geometry_key = f"{settings_prefix}/geometry"
+        self.window_maximized_key = f"{settings_prefix}/maximized"
+
+    def restore_remembered_window(self) -> None:
+        saved_geometry = self.window_settings.value(self.window_geometry_key)
+        if isinstance(saved_geometry, QRect) and saved_geometry.isValid():
+            visible_on_screen = any(
+                screen.availableGeometry().intersects(saved_geometry)
+                for screen in QGuiApplication.screens()
+            )
+            if visible_on_screen:
+                self.setGeometry(saved_geometry)
+        if self.window_settings.value(self.window_maximized_key, False, type=bool):
+            self.setWindowState(self.windowState() | Qt.WindowMaximized)
+
+    def save_additional_window_state(self) -> None:
+        pass
+
+    def save_remembered_window(self) -> None:
+        maximized = self.isMaximized() or bool(self.windowState() & Qt.WindowMaximized)
+        normal_geometry = self.normalGeometry() if maximized else self.geometry()
+        if normal_geometry.isValid():
+            self.window_settings.setValue(self.window_geometry_key, normal_geometry)
+        self.window_settings.setValue(self.window_maximized_key, maximized)
+        self.save_additional_window_state()
+        self.window_settings.sync()
+
+    def accept(self) -> None:
+        self.save_remembered_window()
+        super().accept()
+
+    def reject(self) -> None:
+        self.save_remembered_window()
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        self.save_remembered_window()
+        super().closeEvent(event)
+
+
+class RegistrationDialog(RememberedWindowDialog):
+    WINDOW_SETTINGS_PREFIX = "new_item_dialog"
+
     def __init__(
         self,
         locations: List[str],
@@ -1628,6 +1674,7 @@ class RegistrationDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("新規登録")
         self.setSizeGripEnabled(True)
+        self.configure_window_persistence(self.WINDOW_SETTINGS_PREFIX)
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
@@ -1827,6 +1874,7 @@ class RegistrationDialog(QDialog):
             cancel_button.setDefault(False)
             cancel_button.setAutoDefault(False)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
+        self.restore_remembered_window()
 
     def install_keyboard_scroll_handlers(self) -> None:
         widgets: List[QWidget] = [
@@ -2132,8 +2180,9 @@ class RegistrationDialog(QDialog):
         super().keyPressEvent(event)
 
 
-class EditPalletDialog(QDialog):
+class EditPalletDialog(RememberedWindowDialog):
     COLUMN_WIDTHS_SETTINGS_KEY = "edit_pallet/item_table_header_state_v2"
+    WINDOW_SETTINGS_PREFIX = "pallet_edit_dialog"
     ORDER_COL = 0
     PART_COL = 1
     SIZE_COL = 2
@@ -2152,6 +2201,7 @@ class EditPalletDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("パレット編集")
         self.setSizeGripEnabled(True)
+        self.configure_window_persistence(self.WINDOW_SETTINGS_PREFIX)
         screen = QGuiApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
@@ -2300,6 +2350,7 @@ class EditPalletDialog(QDialog):
             cancel_button.setDefault(False)
             cancel_button.setAutoDefault(False)
         buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); root.addWidget(buttons)
+        self.restore_remembered_window()
 
     def default_item_table_column_widths(self) -> Dict[int, int]:
         return {
@@ -2356,6 +2407,9 @@ class EditPalletDialog(QDialog):
             self.item_table.horizontalHeader().saveState(),
         )
         self.column_width_settings.sync()
+
+    def save_additional_window_state(self) -> None:
+        self.save_item_table_column_widths()
 
     def add_row(self, item: Optional[InventoryItemLine] = None, insert_at_top: bool = False) -> None:
         item = item or InventoryItemLine(part_code="", size="LL", thickness_mm="10", finish_text="S/S", grade="A", sheet_count=1)
@@ -2780,16 +2834,7 @@ class MapNoteDialog(QDialog):
     def accept(self) -> None:
         if self.payload() is None:
             return
-        self.save_item_table_column_widths()
         super().accept()
-
-    def reject(self) -> None:
-        self.save_item_table_column_widths()
-        super().reject()
-
-    def closeEvent(self, event) -> None:
-        self.save_item_table_column_widths()
-        super().closeEvent(event)
 
 
 class ColorLabelNotesDialog(QDialog):
