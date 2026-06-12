@@ -5281,6 +5281,24 @@ class MainWindow(QMainWindow):
             return 0.0
         return (len(occupied_cells) / len(usable_cells)) * 100.0
 
+    def inventory_placement_display_values(self, placements: List[dict]) -> Tuple[str, str]:
+        multiple_pallets = len(placements) > 1
+        pallet_text = ", ".join(
+            f"{placement['pallet_number']}({placement['sheets']})" if multiple_pallets else placement["pallet_number"]
+            for placement in placements
+        )
+
+        location_sheets: Dict[str, int] = {}
+        for placement in placements:
+            location = placement["location"]
+            location_sheets[location] = location_sheets.get(location, 0) + placement["sheets"]
+        multiple_locations = len(location_sheets) > 1
+        location_text = ", ".join(
+            f"{location}({sheets})" if multiple_locations else location
+            for location, sheets in location_sheets.items()
+        )
+        return pallet_text, location_text
+
     def refresh_inventory_table(self) -> None:
         rows: Dict[Tuple[str, str, str, str, str, str], dict] = {}
         for pallet in self.filtered_pallets():
@@ -5312,12 +5330,17 @@ class MainWindow(QMainWindow):
                 note = item.note.strip()
                 if note and note not in row["notes"]:
                     row["notes"].append(note)
-                row["placements"][pallet.pallet_number] = {
-                    "sort_key": (*location_to_grid(pallet.location_code), pallet.stack_order, pallet.pallet_number),
-                    "pallet_number": pallet.pallet_number,
-                    "location": location_stack_label(pallet),
-                    "received_date": pallet.received_date or "-",
-                }
+                placement = row["placements"].setdefault(
+                    pallet.pallet_number,
+                    {
+                        "sort_key": (*location_to_grid(pallet.location_code), pallet.stack_order, pallet.pallet_number),
+                        "pallet_number": pallet.pallet_number,
+                        "location": location_stack_label(pallet),
+                        "received_date": pallet.received_date or "-",
+                        "sheets": 0,
+                    },
+                )
+                placement["sheets"] += item.sheet_count
         sort_key = self.inventory_sort_key
         reverse = self.inventory_sort_desc
 
@@ -5352,6 +5375,7 @@ class MainWindow(QMainWindow):
         for row_index, row in enumerate(ordered):
             placements = sorted_placements(row)
             pallet_numbers = [placement["pallet_number"] for placement in placements]
+            pallet_text, location_text = self.inventory_placement_display_values(placements)
             values = [
                 row["part_code"],
                 row["size"],
@@ -5361,8 +5385,8 @@ class MainWindow(QMainWindow):
                 str(row["sheets"]),
                 row["lot"],
                 " / ".join(row["notes"]),
-                ", ".join(placement["location"] for placement in placements),
-                ", ".join(pallet_numbers),
+                location_text,
+                pallet_text,
                 ", ".join(placement["received_date"] for placement in placements),
             ]
             for col, value in enumerate(values):
