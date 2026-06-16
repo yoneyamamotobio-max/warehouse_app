@@ -283,6 +283,7 @@ class MapNoteRecord:
     map_x: Optional[float] = None
     map_y: Optional[float] = None
     color_key: str = "YELLOW"
+    created_at: str = ""
     updated_at: str = field(default_factory=now_text)
 
 
@@ -472,6 +473,7 @@ class InventoryStore:
                     "map_x": note.map_x,
                     "map_y": note.map_y,
                     "color_key": note.color_key,
+                    "created_at": getattr(note, "created_at", ""),
                     "updated_at": note.updated_at,
                 }
                 for note in self.map_notes
@@ -516,7 +518,7 @@ class InventoryStore:
             color_key = str(note_data.get("color_key", "YELLOW")).upper()
             if color_key not in COLOR_PRESETS or color_key == "AUTO":
                 color_key = "YELLOW"
-            store.map_notes.append(MapNoteRecord(note_id=note_data.get("note_id", uuid4().hex), text=str(note_data.get("text", "")), size=size, map_x=note_data.get("map_x"), map_y=note_data.get("map_y"), color_key=color_key, updated_at=note_data.get("updated_at", now_text())))
+            store.map_notes.append(MapNoteRecord(note_id=note_data.get("note_id", uuid4().hex), text=str(note_data.get("text", "")), size=size, map_x=note_data.get("map_x"), map_y=note_data.get("map_y"), color_key=color_key, created_at=str(note_data.get("created_at", "") or ""), updated_at=note_data.get("updated_at", now_text())))
         store.ensure_defaults()
         store.restore_blocked_locations_with_validation(stored_blocked_locations)
         store.normalize_stacks()
@@ -3050,6 +3052,17 @@ class TopMapWidget(QWidget):
         self.invalidate_base_cache()
         self.update()
 
+    def center_on_note(self, note_id: str) -> None:
+        note = self.store.get_map_note(note_id)
+        if note is None:
+            return
+        target = self.point_from_note(note)
+        viewport_center = self.rect().center()
+        self.pan_offset += viewport_center - target
+        self.clamp_pan()
+        self.invalidate_base_cache()
+        self.update()
+
     def draw_scale(self, bounds: QRect) -> float:
         scale = min(bounds.width() / 42000.0, bounds.height() / 28000.0)
         return max(0.012, min(scale, 0.06))
@@ -4187,6 +4200,14 @@ class MainWindow(QMainWindow):
         ("location_code", "最終位置", 180),
         ("received_date", "入庫日", 150),
     ]
+    MEMO_COLUMNS = [
+        ("location", "保管場所", 120),
+        ("size", "サイズ", 80),
+        ("text", "メモ内容", 360),
+        ("color", "色", 130),
+        ("created_at", "追加日", 160),
+    ]
+    MEMO_TEXT_COLUMN = 2
 
     def __init__(self) -> None:
         super().__init__(); self.store = load_store(); self.current_pallet_number = None; self.current_note_id = None
@@ -4198,6 +4219,8 @@ class MainWindow(QMainWindow):
         self.inventory_sort_desc = False
         self.shipment_sort_key = "shipped_at"
         self.shipment_sort_desc = True
+        self.memo_sort_key = "location"
+        self.memo_sort_desc = False
         self.settings = QSettings(APP_ID, "WarehouseApp")
         hidden_columns = str(self.settings.value("inventory_hidden_columns", "") or "")
         self.inventory_hidden_columns: set[int] = {
@@ -4222,7 +4245,16 @@ class MainWindow(QMainWindow):
             "border-radius:6px; padding:10px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }"
         )
         self.cell_popup.hide()
-        self.cell_popup_timer.timeout.connect(self.cell_popup.hide)
+        self.memo_text_popup = QTextEdit(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.memo_text_popup.setReadOnly(True)
+        self.memo_text_popup.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.memo_text_popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.memo_text_popup.setStyleSheet(
+            "QTextEdit { background:#fff7cc; color:#111111; border:1px solid #806000; "
+            "border-radius:6px; padding:10px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }"
+        )
+        self.memo_text_popup.hide()
+        self.cell_popup_timer.timeout.connect(self.hide_table_popup)
         self.table_long_press_timer = QTimer(self)
         self.table_long_press_timer.setSingleShot(True)
         self.table_long_press_timer.timeout.connect(self.enable_table_multi_select_from_long_press)
@@ -4420,6 +4452,53 @@ class MainWindow(QMainWindow):
         self.shipment_table.itemEntered.connect(lambda item: self.show_table_item_tooltip(self.shipment_table, item))
         self.shipment_table.currentItemChanged.connect(lambda current, _previous: self.show_table_item_tooltip(self.shipment_table, current))
         self.tabs.addTab(self.wrap_widget(self.shipment_table), "出庫一覧")
+        self.memo_search_input = QLineEdit()
+        self.memo_search_input.setPlaceholderText("メモ検索")
+        self.memo_search_input.setClearButtonEnabled(True)
+        self.memo_search_input.textChanged.connect(self.refresh_memo_table)
+        self.memo_table = QTableWidget(0, len(self.MEMO_COLUMNS))
+        self.memo_table.setObjectName("memoTable")
+        self.memo_table.setHorizontalHeaderLabels([label for _key, label, _width in self.MEMO_COLUMNS])
+        memo_header = TouchFriendlyHeaderView(Qt.Horizontal, self.memo_table)
+        self.memo_table.setHorizontalHeader(memo_header)
+        self.memo_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.memo_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.memo_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.memo_table.setShowGrid(True)
+        self.memo_table.setGridStyle(Qt.SolidLine)
+        self.memo_table.setAlternatingRowColors(True)
+        self.memo_table.setMouseTracking(True)
+        self.memo_table.viewport().installEventFilter(self)
+        self.memo_table.horizontalHeader().setSectionsMovable(False)
+        self.memo_table.horizontalHeader().setSectionsClickable(True)
+        self.memo_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.memo_table.horizontalHeader().setMinimumSectionSize(72)
+        self.memo_table.horizontalHeader().setMinimumHeight(42)
+        self.memo_table.verticalHeader().setDefaultSectionSize(42)
+        self.configure_table_for_touch(self.memo_table)
+        for col, (_key, _label, width) in enumerate(self.MEMO_COLUMNS):
+            self.memo_table.setColumnWidth(col, width)
+        memo_hint = QLabel("メモを検索できます。行をダブルクリックすると真上ビューで位置を確認できます。")
+        memo_hint.setObjectName("inventoryHint")
+        memo_hint.setWordWrap(True)
+        memo_shell = QWidget()
+        memo_layout = QVBoxLayout(memo_shell)
+        memo_layout.setContentsMargins(8, 8, 8, 8)
+        memo_layout.setSpacing(6)
+        memo_layout.addWidget(self.memo_search_input)
+        memo_layout.addWidget(memo_hint)
+        memo_layout.addWidget(self.memo_table, 1)
+        self.tabs.addTab(memo_shell, "メモ一覧")
+        self.memo_table.horizontalHeader().sectionClicked.connect(self.handle_memo_header_click)
+        self.memo_table.cellDoubleClicked.connect(self.select_note_from_memo_table)
+        self.memo_table.cellClicked.connect(lambda row, col: self.show_table_cell_tooltip(self.memo_table, row, col))
+        self.memo_table.cellPressed.connect(lambda row, _col: QTimer.singleShot(0, lambda: self.show_memo_content_popup(row)))
+        self.memo_table.itemPressed.connect(lambda item: QTimer.singleShot(0, lambda: self.show_memo_content_popup(item.row() if item is not None else -1)))
+        self.memo_table.currentCellChanged.connect(lambda _row, _col, _prev_row, _prev_col: self.hide_table_popup())
+        self.memo_table.itemSelectionChanged.connect(lambda: QTimer.singleShot(0, self.show_selected_memo_content_popup))
+        self.memo_table.currentItemChanged.connect(lambda current, _previous: QTimer.singleShot(0, lambda: self.show_memo_content_popup(current.row() if current is not None else -1)))
+        self.memo_table.itemEntered.connect(lambda item: self.show_table_item_tooltip(self.memo_table, item))
+        self.memo_table.currentItemChanged.connect(lambda current, _previous: self.show_table_item_tooltip(self.memo_table, current))
         self.help_page = self.build_help_page(); self.help_tab_widget = self.wrap_widget(self.help_page); self.tabs.addTab(self.help_tab_widget, "ヘルプ")
         self.update_tab_visuals()
         self.apply_responsive_layout()
@@ -4540,19 +4619,23 @@ class MainWindow(QMainWindow):
         tab_bar = self.tabs.tabBar()
         inventory_color = QColor("#39d98a")
         shipment_color = QColor("#ff8a80")
+        memo_color = QColor("#62d6c8")
         help_color = QColor("#ffd37a")
         tab_bar.setTabTextColor(0, QColor("#88c3f0"))
         tab_bar.setTabTextColor(1, QColor("#88c3f0"))
         tab_bar.setTabTextColor(2, inventory_color)
         tab_bar.setTabTextColor(3, shipment_color)
-        tab_bar.setTabTextColor(4, help_color)
+        tab_bar.setTabTextColor(4, memo_color)
+        tab_bar.setTabTextColor(5, help_color)
         self.tabs.setTabIcon(2, solid_circle_icon(inventory_color.name()))
         self.tabs.setTabIcon(3, solid_circle_icon(shipment_color.name()))
-        self.tabs.setTabIcon(4, solid_circle_icon(help_color.name()))
+        self.tabs.setTabIcon(4, solid_circle_icon(memo_color.name()))
+        self.tabs.setTabIcon(5, solid_circle_icon(help_color.name()))
 
     def handle_tab_changed(self, _index: int) -> None:
         is_inventory = self.tabs.currentIndex() == 2
         is_shipment = self.tabs.currentIndex() == 3
+        is_memo = hasattr(self, "memo_table") and self.tabs.currentIndex() == 4
         is_help = hasattr(self, "help_tab_widget") and self.tabs.currentWidget() == self.help_tab_widget
         self.search_input.setVisible(is_inventory or is_shipment)
         self.inventory_columns_button.setVisible(is_inventory)
@@ -4563,6 +4646,8 @@ class MainWindow(QMainWindow):
         self.delete_shipment_button.setVisible(is_shipment)
         if hasattr(self, "iso_rotate_button"):
             self.iso_rotate_button.setVisible(self.tabs.currentIndex() == 1)
+        if is_memo:
+            self.refresh_memo_table()
         if is_help and isinstance(self.help_page, QScrollArea):
             self.help_page.verticalScrollBar().setValue(0)
         self.update_detail_overlay_geometry()
@@ -4590,7 +4675,7 @@ class MainWindow(QMainWindow):
         table.setDragDropMode(QAbstractItemView.NoDragDrop)
 
     def table_for_viewport(self, source) -> Optional[QTableWidget]:
-        for table in (getattr(self, "inventory_table", None), getattr(self, "shipment_table", None)):
+        for table in (getattr(self, "inventory_table", None), getattr(self, "shipment_table", None), getattr(self, "memo_table", None)):
             if table is not None and source == table.viewport():
                 return table
         return None
@@ -4634,6 +4719,7 @@ class MainWindow(QMainWindow):
         stack_detail_selector = getattr(self, "stack_detail_selector", None)
         inventory_table = getattr(self, "inventory_table", None)
         shipment_table = getattr(self, "shipment_table", None)
+        memo_table = getattr(self, "memo_table", None)
         map_container = getattr(self, "map_container", None)
         tabs = getattr(self, "tabs", None)
         current_page = stack_detail_pages.currentWidget() if stack_detail_pages is not None else None
@@ -4648,6 +4734,8 @@ class MainWindow(QMainWindow):
             popup_tables[inventory_table.viewport()] = inventory_table
         if shipment_table is not None:
             popup_tables[shipment_table.viewport()] = shipment_table
+        if memo_table is not None:
+            popup_tables[memo_table.viewport()] = memo_table
         popup_table = popup_tables.get(source)
         touch_table = self.table_for_viewport(source)
         if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
@@ -4692,7 +4780,7 @@ class MainWindow(QMainWindow):
                 self.table_long_press_table = None
         if event.type() in (QEvent.MouseButtonPress, QEvent.TouchBegin):
             allowed_sources = set(popup_tables.keys())
-            allowed_sources.update({inventory_table, shipment_table, self.cell_popup})
+            allowed_sources.update({inventory_table, shipment_table, memo_table, self.cell_popup, self.memo_text_popup, self.memo_text_popup.viewport()})
             if source not in allowed_sources:
                 self.hide_table_popup()
         if popup_table is not None:
@@ -4804,6 +4892,9 @@ class MainWindow(QMainWindow):
         self.copy_shipment_button.setText("コピー" if compact else "一覧コピー")
         self.export_inventory_button.setText("棚卸出力" if compact else "棚卸データ出力")
         self.search_input.setPlaceholderText("検索" if narrow else "例: 39 LL 10 A")
+        if hasattr(self, "memo_search_input"):
+            self.memo_search_input.setMinimumHeight(max(combo_height, 40))
+            self.memo_search_input.setPlaceholderText("メモ検索" if narrow else "保管場所 / サイズ / メモ内容 / 色 / 追加日")
         if hasattr(self, "iso_rotate_button") and hasattr(self, "iso_map"):
             self.iso_rotate_button.setText("視点90°")
             self.iso_rotate_button.setFixedHeight(30 if compact else 34)
@@ -5163,7 +5254,7 @@ class MainWindow(QMainWindow):
         self.summary_label.setText(f"パレット {len(placed_pallets)} / 明細 {sum(len(p.items) for p in placed_pallets)} / 総枚数 {sum(p.total_sheets for p in placed_pallets)} / 使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
         self.update_move_history_buttons()
         self.top_map.invalidate_base_cache()
-        self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_shipment_table(); self.refresh_detail()
+        self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_shipment_table(); self.refresh_memo_table(); self.refresh_detail()
 
     def normalize_store_stacks(self) -> None:
         self.store.normalize_stacks()
@@ -5451,6 +5542,75 @@ class MainWindow(QMainWindow):
                     item.setData(Qt.UserRole, shipment.shipment_id)
                 self.shipment_table.setItem(row_index, col, item)
 
+    def note_location_label(self, note: MapNoteRecord) -> str:
+        map_x = getattr(note, "map_x", None)
+        map_y = getattr(note, "map_y", None)
+        if map_x is None or map_y is None:
+            return "未配置"
+        try:
+            x = float(map_x)
+            y = float(map_y)
+        except (TypeError, ValueError):
+            return "未配置"
+        if y > 1.0:
+            return "仮置きエリア"
+        col, row = normalized_map_to_grid(x, y)
+        return visible_location_code(format_location_code(col, row))
+
+    def memo_row_values(self, note: MapNoteRecord) -> dict:
+        color_key = str(getattr(note, "color_key", "") or "").upper()
+        color_text = color_choice_label(color_key, self.store) if color_key in COLOR_PRESETS else ""
+        created_at = str(getattr(note, "created_at", "") or "")
+        return {
+            "note_id": note.note_id,
+            "location": self.note_location_label(note),
+            "size": str(getattr(note, "size", "") or ""),
+            "text": str(getattr(note, "text", "") or ""),
+            "color": color_text,
+            "created_at": created_at,
+            "created_display": created_at or "不明",
+        }
+
+    def memo_matches_keyword(self, row: dict) -> bool:
+        query = self.memo_search_input.text().strip().lower() if hasattr(self, "memo_search_input") else ""
+        if not query:
+            return True
+        tokens = [token for token in query.split() if token]
+        haystacks = [
+            str(row["location"]).lower(),
+            str(row["size"]).lower(),
+            str(row["text"]).lower(),
+            str(row["color"]).lower(),
+            str(row["created_display"]).lower(),
+        ]
+        return all(any(token in hay for hay in haystacks) for token in tokens)
+
+    def memo_sort_value(self, row: dict):
+        value = row["created_at"] if self.memo_sort_key == "created_at" else row.get(self.memo_sort_key, "")
+        return (str(value).lower(), row["location"], row["note_id"])
+
+    def refresh_memo_table(self) -> None:
+        if not hasattr(self, "memo_table"):
+            return
+        rows = [self.memo_row_values(note) for note in self.store.map_notes]
+        rows = [row for row in rows if self.memo_matches_keyword(row)]
+        rows.sort(key=self.memo_sort_value, reverse=self.memo_sort_desc)
+        self.memo_table.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            values = [
+                row["location"],
+                row["size"],
+                row["text"],
+                row["color"],
+                row["created_display"],
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                if col == 0:
+                    item.setData(Qt.UserRole, row["note_id"])
+                self.memo_table.setItem(row_index, col, item)
+
     def show_table_item_tooltip(self, table: QTableWidget, item: Optional[QTableWidgetItem]) -> None:
         if table is None or item is None:
             return
@@ -5476,6 +5636,8 @@ class MainWindow(QMainWindow):
     def hide_table_popup(self) -> None:
         self.cell_popup_timer.stop()
         self.cell_popup.hide()
+        if hasattr(self, "memo_text_popup"):
+            self.memo_text_popup.hide()
         QToolTip.hideText()
 
     def is_cell_text_elided(self, table: QTableWidget, item: Optional[QTableWidgetItem]) -> bool:
@@ -5552,6 +5714,46 @@ class MainWindow(QMainWindow):
             return
         self.show_table_item_popup(table, item)
 
+    def show_selected_memo_content_popup(self) -> None:
+        if not hasattr(self, "memo_table"):
+            return
+        selected_rows = sorted({index.row() for index in self.memo_table.selectionModel().selectedRows()})
+        row = selected_rows[0] if selected_rows else self.memo_table.currentRow()
+        self.show_memo_content_popup(row)
+
+    def show_memo_content_popup(self, row: int) -> None:
+        self.hide_table_popup()
+        if not hasattr(self, "memo_table") or row < 0:
+            return
+        item = self.memo_table.item(row, self.MEMO_TEXT_COLUMN)
+        if item is None:
+            return
+        text = item.text()
+        if not text or not text.strip():
+            return
+        rect = self.memo_table.visualItemRect(item)
+        if not rect.isValid():
+            return
+        popup = self.memo_text_popup
+        popup.setPlainText(text)
+        popup.resize(520, 260)
+        global_pos = self.memo_table.viewport().mapToGlobal(rect.bottomLeft() + QPoint(0, 6))
+        screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            popup_width = min(560, max(360, min(available.width() - 24, max(rect.width(), 520))))
+            popup_height = min(360, max(160, min(available.height() - 24, 260)))
+            popup.resize(popup_width, popup_height)
+            x = min(max(global_pos.x(), available.left() + 6), max(available.left() + 6, available.right() - popup_width - 6))
+            y = global_pos.y()
+            if y + popup_height > available.bottom() - 6:
+                y = max(available.top() + 6, self.memo_table.viewport().mapToGlobal(rect.topLeft()).y() - popup_height - 6)
+            global_pos = QPoint(x, y)
+        popup.move(global_pos)
+        popup.show()
+        popup.raise_()
+        self.cell_popup_timer.start(12000)
+
     def schedule_table_popup_from_point(self, table: QTableWidget, point: QPoint) -> None:
         if table is None:
             return
@@ -5560,6 +5762,9 @@ class MainWindow(QMainWindow):
             return
         row = index.row()
         column = index.column()
+        if table is getattr(self, "memo_table", None):
+            QTimer.singleShot(0, lambda row=row: self.show_memo_content_popup(row))
+            return
         QTimer.singleShot(0, lambda table=table, row=row, column=column: self.show_table_cell_popup(table, row, column))
 
     def copy_table_to_clipboard(self, table: QTableWidget, skip_hidden_columns: bool = False) -> None:
@@ -5770,6 +5975,19 @@ class MainWindow(QMainWindow):
             self.shipment_sort_desc = False
         self.refresh_shipment_table()
 
+    def handle_memo_header_click(self, column: int) -> None:
+        if column < 0 or column >= len(self.MEMO_COLUMNS):
+            return
+        target = self.MEMO_COLUMNS[column][0]
+        if not target:
+            return
+        if self.memo_sort_key == target:
+            self.memo_sort_desc = not self.memo_sort_desc
+        else:
+            self.memo_sort_key = target
+            self.memo_sort_desc = False
+        self.refresh_memo_table()
+
     def select_pallet_from_inventory_table(self, row: int, _column: int) -> None:
         item = self.inventory_table.item(row, self.INVENTORY_PALLET_COLUMN)
         pallet_numbers = item.data(Qt.UserRole) if item is not None else None
@@ -5796,6 +6014,17 @@ class MainWindow(QMainWindow):
         self.detail_frame.hide()
         self.top_map.update()
         self.iso_map.update()
+
+    def select_note_from_memo_table(self, row: int, _column: int) -> None:
+        item = self.memo_table.item(row, 0) if hasattr(self, "memo_table") else None
+        note_id = item.data(Qt.UserRole) if item is not None else None
+        if not note_id or self.store.get_map_note(str(note_id)) is None:
+            return
+        self.tabs.setCurrentIndex(0)
+        self.select_map_note(str(note_id))
+        self.top_map.center_on_note(str(note_id))
+        self.top_map.attention_visible = True
+        self.top_map.update()
 
     def next_pallet_after_shipping(self, location_code: str, previous_stack_order: int) -> Optional[str]:
         remaining = [
@@ -6211,7 +6440,8 @@ class MainWindow(QMainWindow):
         if payload is None:
             return
         text, size, color_key = payload
-        note = MapNoteRecord(text=text, size=size, color_key=color_key, map_x=ENTRY_MAP_X, map_y=ENTRY_MAP_Y, updated_at=now_text())
+        created_at = now_text()
+        note = MapNoteRecord(text=text, size=size, color_key=color_key, map_x=ENTRY_MAP_X, map_y=ENTRY_MAP_Y, created_at=created_at, updated_at=created_at)
         try:
             note.map_x, note.map_y = self.find_map_note_waiting_placement(note)
         except ValueError as exc:
