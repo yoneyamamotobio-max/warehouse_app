@@ -573,6 +573,17 @@ def create_daily_backup(path: Path = DATA_PATH) -> None:
     prune_old_daily_backups(path)
 
 
+def create_startup_daily_backup(path: Path = DATA_PATH, existed_at_startup: Optional[bool] = None) -> None:
+    if existed_at_startup is None:
+        existed_at_startup = path.exists()
+    if not existed_at_startup:
+        return
+    try:
+        create_daily_backup(path)
+    except Exception:
+        log_store_error(f"startup daily backup failed: {path}\n{traceback.format_exc()}")
+
+
 def prune_old_daily_backups(path: Path = DATA_PATH, retention_days: int = DAILY_BACKUP_RETENTION_DAYS) -> None:
     if retention_days <= 0:
         return
@@ -4210,7 +4221,7 @@ class MainWindow(QMainWindow):
     MEMO_TEXT_COLUMN = 2
 
     def __init__(self) -> None:
-        super().__init__(); self.store = load_store(); self.current_pallet_number = None; self.current_note_id = None
+        super().__init__(); data_file_existed_at_startup = DATA_PATH.exists(); self.store = load_store(); create_startup_daily_backup(DATA_PATH, data_file_existed_at_startup); self.current_pallet_number = None; self.current_note_id = None
         self.last_registration_item_cache: Optional[InventoryItemLine] = None
         self.move_undo_stack: List[MoveAction] = []
         self.move_redo_stack: List[MoveAction] = []
