@@ -731,6 +731,7 @@ def normalize_thickness_input(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
     for ch in ["、", "・", "･", "．", "，", ","]:
         normalized = normalized.replace(ch, ".")
+    normalized = normalized.replace("／", "/")
     normalized = re.sub(r"\s+", "", normalized)
     for ch in ["〜", "～", "∼", "∾", "∿", "〰"]:
         normalized = normalized.replace(ch, "~")
@@ -747,6 +748,8 @@ def normalize_finish_text(text: str) -> str:
     normalized = normalize_text(text)
     for ch in ["￥", "¥", "\\", "。", "？", "?"]:
         normalized = normalized.replace(ch, "/")
+    for ch in ["ー", "－", "―", "‐", "‑", "‒", "–", "—", "−"]:
+        normalized = normalized.replace(ch, "-")
     return re.sub(r"\s+", " ", normalized).strip().upper()
 
 
@@ -1034,14 +1037,28 @@ def map_note_popup_text(note: MapNoteRecord) -> str:
 
 
 def parse_thickness_value(thickness_text: str) -> float:
-    numbers = [float(value) for value in re.findall(r"\d+(?:\.\d+)?", str(thickness_text or ""))]
+    text = normalize_thickness_input(thickness_text)
+    fraction_match = re.fullmatch(r"(\d+)/(\d+)", text)
+    if fraction_match:
+        numerator = float(fraction_match.group(1))
+        denominator = float(fraction_match.group(2))
+        if denominator != 0:
+            return numerator / denominator
+    numbers = [float(value) for value in re.findall(r"\d+(?:\.\d+)?", text)]
     if not numbers:
         return 0.0
     return max(numbers)
 
 
 def thickness_values(thickness_text: str) -> List[float]:
-    return [float(value) for value in re.findall(r"\d+(?:\.\d+)?", str(thickness_text or ""))]
+    text = normalize_thickness_input(thickness_text)
+    fraction_match = re.fullmatch(r"(\d+)/(\d+)", text)
+    if fraction_match:
+        numerator = float(fraction_match.group(1))
+        denominator = float(fraction_match.group(2))
+        if denominator != 0:
+            return [numerator / denominator]
+    return [float(value) for value in re.findall(r"\d+(?:\.\d+)?", text)]
 
 
 def is_single_thickness(thickness_text: str) -> bool:
@@ -1054,10 +1071,18 @@ def is_thickness_range(thickness_text: str) -> bool:
     return re.fullmatch(r"\d+(?:\.\d+)?[-~〜]\d+(?:\.\d+)?", text) is not None
 
 
+def is_fraction_thickness(thickness_text: str) -> bool:
+    text = normalize_thickness_input(thickness_text)
+    match = re.fullmatch(r"\d+/\d+", text)
+    return match is not None and not text.endswith("/0")
+
+
 def is_valid_thickness(thickness_text: str) -> bool:
     text = normalize_thickness_input(thickness_text)
     if not text or text.startswith("-"):
         return False
+    if is_fraction_thickness(text):
+        return True
     values = thickness_values(text)
     if not values:
         return False
@@ -1204,7 +1229,7 @@ def validate_item_fields(
     if not normalized_thickness:
         return None, normalized_fields, "厚みを入力してください。"
     if not is_valid_thickness(normalized_thickness):
-        return None, normalized_fields, "厚みは 0.3〜35mm の単一値、または 3-3.5 / 3~3.5 の形式で入力してください。"
+        return None, normalized_fields, "厚みは 0.3〜35mm の単一値、3-3.5 / 3~3.5、または 1/16 の形式で入力してください。"
     if not normalized_finish:
         return None, normalized_fields, "加工 / 裏表を入力してください。"
     if normalized_grade not in VALID_GRADES:
@@ -4256,10 +4281,10 @@ class MainWindow(QMainWindow):
             "border-radius:6px; padding:10px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }"
         )
         self.cell_popup.hide()
-        self.memo_text_popup = QTextEdit(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.memo_text_popup = QTextEdit(self.centralWidget() or self)
+        self.memo_text_popup.setWindowFlags(Qt.Widget)
         self.memo_text_popup.setReadOnly(True)
         self.memo_text_popup.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.memo_text_popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.memo_text_popup.setStyleSheet(
             "QTextEdit { background:#fff7cc; color:#111111; border:1px solid #806000; "
             "border-radius:6px; padding:10px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }"
@@ -5401,6 +5426,16 @@ class MainWindow(QMainWindow):
         )
         return pallet_text, location_text
 
+    def inventory_notes_display_value(self, row: dict, placements: List[dict]) -> str:
+        if len(placements) <= 1:
+            return " / ".join(row["notes"])
+        placement_notes = []
+        for placement in placements:
+            notes = " / ".join(placement.get("notes", []))
+            if notes:
+                placement_notes.append(f"{placement['pallet_number']}({placement['sheets']}): {notes}")
+        return " / ".join(placement_notes)
+
     def refresh_inventory_table(self) -> None:
         rows: Dict[Tuple[str, str, str, str, str, str], dict] = {}
         for pallet in self.filtered_pallets():
@@ -5440,9 +5475,12 @@ class MainWindow(QMainWindow):
                         "location": location_stack_label(pallet),
                         "received_date": pallet.received_date or "-",
                         "sheets": 0,
+                        "notes": [],
                     },
                 )
                 placement["sheets"] += item.sheet_count
+                if note and note not in placement["notes"]:
+                    placement["notes"].append(note)
         sort_key = self.inventory_sort_key
         reverse = self.inventory_sort_desc
 
@@ -5461,7 +5499,7 @@ class MainWindow(QMainWindow):
             if sort_key == "lot":
                 return (row["lot"], row["part_code"], row["size"])
             if sort_key == "note":
-                return (" / ".join(row["notes"]), row["part_code"], row["size"])
+                return (self.inventory_notes_display_value(row, sorted_placements(row)), row["part_code"], row["size"])
             if sort_key == "size":
                 return (row["size"], row["part_code"], parse_thickness_value(row["thickness"]), row["thickness"])
             if sort_key == "pallets":
@@ -5478,6 +5516,7 @@ class MainWindow(QMainWindow):
             placements = sorted_placements(row)
             pallet_numbers = [placement["pallet_number"] for placement in placements]
             pallet_text, location_text = self.inventory_placement_display_values(placements)
+            notes_text = self.inventory_notes_display_value(row, placements)
             values = [
                 row["part_code"],
                 row["size"],
@@ -5486,7 +5525,7 @@ class MainWindow(QMainWindow):
                 row["grade"],
                 str(row["sheets"]),
                 row["lot"],
-                " / ".join(row["notes"]),
+                notes_text,
                 location_text,
                 pallet_text,
                 ", ".join(placement["received_date"] for placement in placements),
@@ -5747,20 +5786,21 @@ class MainWindow(QMainWindow):
             return
         popup = self.memo_text_popup
         popup.setPlainText(text)
-        popup.resize(520, 260)
-        global_pos = self.memo_table.viewport().mapToGlobal(rect.bottomLeft() + QPoint(0, 6))
-        screen = QGuiApplication.screenAt(global_pos) or QGuiApplication.primaryScreen()
-        if screen is not None:
-            available = screen.availableGeometry()
-            popup_width = min(560, max(360, min(available.width() - 24, max(rect.width(), 520))))
-            popup_height = min(360, max(160, min(available.height() - 24, 260)))
-            popup.resize(popup_width, popup_height)
-            x = min(max(global_pos.x(), available.left() + 6), max(available.left() + 6, available.right() - popup_width - 6))
-            y = global_pos.y()
-            if y + popup_height > available.bottom() - 6:
-                y = max(available.top() + 6, self.memo_table.viewport().mapToGlobal(rect.topLeft()).y() - popup_height - 6)
-            global_pos = QPoint(x, y)
-        popup.move(global_pos)
+        parent = popup.parentWidget() or self
+        bounds = parent.rect().adjusted(6, 6, -6, -6)
+        max_width = max(260, bounds.width())
+        max_height = max(140, bounds.height())
+        popup_width = min(560, max(360, min(max_width, max(rect.width(), 520))))
+        popup_height = min(360, max(160, min(max_height, 260)))
+        popup.resize(popup_width, popup_height)
+        pos = self.memo_table.viewport().mapTo(parent, rect.bottomLeft() + QPoint(0, 6))
+        x = min(max(pos.x(), bounds.left()), max(bounds.left(), bounds.right() - popup_width + 1))
+        y = pos.y()
+        if y + popup_height > bounds.bottom() + 1:
+            top_pos = self.memo_table.viewport().mapTo(parent, rect.topLeft()).y() - popup_height - 6
+            y = max(bounds.top(), top_pos)
+        y = min(max(y, bounds.top()), max(bounds.top(), bounds.bottom() - popup_height + 1))
+        popup.move(QPoint(x, y))
         popup.show()
         popup.raise_()
         self.cell_popup_timer.start(12000)
