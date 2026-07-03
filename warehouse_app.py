@@ -5408,36 +5408,83 @@ class MainWindow(QMainWindow):
             return 0.0
         return (len(occupied_cells) / len(usable_cells)) * 100.0
 
-    def inventory_placement_display_values(self, placements: List[dict]) -> Tuple[str, str]:
-        multiple_pallets = len(placements) > 1
-        pallet_text = ", ".join(
-            f"{placement['pallet_number']}({placement['sheets']})" if multiple_pallets else placement["pallet_number"]
-            for placement in placements
+    def inventory_pallet_sort_key(self, pallet_summary: dict) -> Tuple[str, str, str, str]:
+        received_date = str(pallet_summary.get("received_date") or "")
+        normalized_date = received_date.replace("/", "-")
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized_date):
+            normalized_date = "9999-99-99"
+        return (
+            normalized_date,
+            str(pallet_summary.get("pallet_number") or ""),
+            str(pallet_summary.get("location") or ""),
+            "\n".join(sorted(str(lot or "") for lot in pallet_summary.get("lots", {}))),
         )
 
-        location_sheets: Dict[str, int] = {}
-        for placement in placements:
-            location = placement["location"]
-            location_sheets[location] = location_sheets.get(location, 0) + placement["sheets"]
-        multiple_locations = len(location_sheets) > 1
-        location_text = ", ".join(
-            f"{location}({sheets})" if multiple_locations else location
-            for location, sheets in location_sheets.items()
-        )
-        return pallet_text, location_text
+    def sorted_inventory_pallets(self, row: dict) -> List[dict]:
+        return sorted(row["pallets"].values(), key=self.inventory_pallet_sort_key)
 
-    def inventory_notes_display_value(self, row: dict, placements: List[dict]) -> str:
-        if len(placements) <= 1:
-            return " / ".join(row["notes"])
-        placement_notes = []
-        for placement in placements:
-            notes = " / ".join(placement.get("notes", []))
-            if notes:
-                placement_notes.append(f"{placement['pallet_number']}({placement['sheets']}): {notes}")
-        return " / ".join(placement_notes)
+    def inventory_counted_text(self, text: str, sheets: int, *, force_count: bool = True) -> str:
+        label = str(text or "").strip()
+        if not label:
+            label = "未入力"
+        return f"{label}({sheets})" if force_count else label
+
+    def inventory_detail_number_label(self, index: int) -> str:
+        circled_numbers = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+        if 1 <= index <= len(circled_numbers):
+            return circled_numbers[index - 1]
+        return f"{index}."
+
+    def inventory_numbered_detail_text(self, index: int, text: str, sheets: int, *, force_count: bool = True) -> str:
+        value = self.inventory_counted_text(text, sheets, force_count=force_count)
+        if force_count:
+            return f"{self.inventory_detail_number_label(index)} {value}"
+        return value
+
+    def inventory_summary_lines(self, values: Dict[str, int], *, numbered_index: Optional[int], force_count: bool) -> List[str]:
+        if not values:
+            values = {"": 0}
+        lines = []
+        for text, sheets in sorted(values.items(), key=lambda item: str(item[0] or "")):
+            value = self.inventory_counted_text(text, sheets, force_count=force_count)
+            if numbered_index is not None:
+                value = f"{self.inventory_detail_number_label(numbered_index)} {value}"
+            lines.append(value)
+        return lines
+
+    def inventory_pallet_display_values(self, pallets: List[dict]) -> Tuple[str, str, str, str, str]:
+        if not pallets:
+            return "", "", "", "", ""
+        force_number = len(pallets) > 1
+        force_pallet_count = len(pallets) > 1
+        lot_texts = []
+        note_texts = []
+        location_texts = []
+        pallet_texts = []
+        received_date_texts = []
+        for index, pallet_summary in enumerate(pallets, start=1):
+            numbered_index = index if force_number else None
+            lots = pallet_summary.get("lots", {})
+            notes = pallet_summary.get("notes", {})
+            lot_force_count = force_number or len(lots) > 1
+            note_force_count = force_number or len(notes) > 1
+            lot_texts.extend(self.inventory_summary_lines(lots, numbered_index=numbered_index, force_count=lot_force_count))
+            has_note_text = any(str(note or "").strip() for note in notes)
+            if force_number or has_note_text or len(notes) > 1:
+                note_texts.extend(self.inventory_summary_lines(notes, numbered_index=numbered_index, force_count=note_force_count))
+            location_texts.append(self.inventory_numbered_detail_text(numbered_index or 0, pallet_summary.get("location", ""), pallet_summary["sheets"], force_count=force_pallet_count and numbered_index is not None))
+            pallet_texts.append(self.inventory_numbered_detail_text(numbered_index or 0, pallet_summary.get("pallet_number", ""), pallet_summary["sheets"], force_count=force_pallet_count and numbered_index is not None))
+            received_date_texts.append(self.inventory_numbered_detail_text(numbered_index or 0, pallet_summary.get("received_date", ""), pallet_summary["sheets"], force_count=force_pallet_count and numbered_index is not None))
+        return (
+            "\n".join(lot_texts),
+            "\n".join(note_texts),
+            "\n".join(location_texts),
+            "\n".join(pallet_texts),
+            "\n".join(received_date_texts),
+        )
 
     def refresh_inventory_table(self) -> None:
-        rows: Dict[Tuple[str, str, str, str, str, str], dict] = {}
+        rows: Dict[Tuple[str, str, str, str, str], dict] = {}
         for pallet in self.filtered_pallets():
             for item in pallet.items:
                 if not self.item_matches_keyword(item):
@@ -5446,7 +5493,7 @@ class MainWindow(QMainWindow):
                     if pallet_tokens and not all(any(token in hay for hay in pallet_haystacks) for token in pallet_tokens):
                         continue
                 thickness_text = str(item.thickness_mm)
-                key = (item.part_code, item.size, thickness_text, item.finish_text, item.grade, item.lot)
+                key = (item.part_code, item.size, thickness_text, item.finish_text, item.grade)
                 row = rows.setdefault(
                     key,
                     {
@@ -5455,39 +5502,37 @@ class MainWindow(QMainWindow):
                         "thickness": thickness_text,
                         "finish": item.finish_text,
                         "grade": item.grade,
-                        "lot": item.lot,
-                        "notes": [],
                         "sheets": 0,
                         "height": 0,
-                        "placements": {},
+                        "pallets": {},
                     },
                 )
                 row["sheets"] += item.sheet_count
                 row["height"] += item.height_mm
                 note = item.note.strip()
-                if note and note not in row["notes"]:
-                    row["notes"].append(note)
-                placement = row["placements"].setdefault(
+                lot = normalize_lot(getattr(item, "lot", ""))
+                location = location_stack_label(pallet)
+                received_date = pallet.received_date or "-"
+                pallet_summary = row["pallets"].setdefault(
                     pallet.pallet_number,
                     {
-                        "sort_key": (*location_to_grid(pallet.location_code), pallet.stack_order, pallet.pallet_number),
+                        "received_date": received_date,
                         "pallet_number": pallet.pallet_number,
-                        "location": location_stack_label(pallet),
-                        "received_date": pallet.received_date or "-",
+                        "location": location,
                         "sheets": 0,
-                        "notes": [],
+                        "lots": {},
+                        "notes": {},
                     },
                 )
-                placement["sheets"] += item.sheet_count
-                if note and note not in placement["notes"]:
-                    placement["notes"].append(note)
+                pallet_summary["sheets"] += item.sheet_count
+                pallet_summary["lots"][lot] = pallet_summary["lots"].get(lot, 0) + item.sheet_count
+                pallet_summary["notes"][note] = pallet_summary["notes"].get(note, 0) + item.sheet_count
         sort_key = self.inventory_sort_key
         reverse = self.inventory_sort_desc
 
-        def sorted_placements(row: dict) -> List[dict]:
-            return sorted(row["placements"].values(), key=lambda placement: placement["sort_key"])
-
         def sort_value(row: dict):
+            pallets = self.sorted_inventory_pallets(row)
+            lot_text, note_text, location_text, pallet_text, received_date_text = self.inventory_pallet_display_values(pallets)
             if sort_key == "thickness":
                 return (parse_thickness_value(row["thickness"]), row["thickness"], row["part_code"], row["size"])
             if sort_key == "finish":
@@ -5497,26 +5542,25 @@ class MainWindow(QMainWindow):
             if sort_key == "sheets":
                 return (row["sheets"], row["part_code"], row["size"])
             if sort_key == "lot":
-                return (row["lot"], row["part_code"], row["size"])
+                return (lot_text, row["part_code"], row["size"])
             if sort_key == "note":
-                return (self.inventory_notes_display_value(row, sorted_placements(row)), row["part_code"], row["size"])
+                return (note_text, row["part_code"], row["size"])
             if sort_key == "size":
                 return (row["size"], row["part_code"], parse_thickness_value(row["thickness"]), row["thickness"])
             if sort_key == "pallets":
-                return (", ".join(placement["pallet_number"] for placement in sorted_placements(row)), row["part_code"], row["size"])
+                return (pallet_text, row["part_code"], row["size"])
             if sort_key == "locations":
-                return (", ".join(placement["location"] for placement in sorted_placements(row)), row["part_code"], row["size"])
+                return (location_text, row["part_code"], row["size"])
             if sort_key == "received_dates":
-                return (", ".join(placement["received_date"] for placement in sorted_placements(row)), row["part_code"], row["size"])
+                return (received_date_text, row["part_code"], row["size"])
             return (row["part_code"], row["size"], parse_thickness_value(row["thickness"]), row["thickness"])
 
         ordered = sorted(rows.values(), key=sort_value, reverse=reverse)
         self.inventory_table.setRowCount(len(ordered))
         for row_index, row in enumerate(ordered):
-            placements = sorted_placements(row)
-            pallet_numbers = [placement["pallet_number"] for placement in placements]
-            pallet_text, location_text = self.inventory_placement_display_values(placements)
-            notes_text = self.inventory_notes_display_value(row, placements)
+            pallets = self.sorted_inventory_pallets(row)
+            pallet_numbers = [pallet_summary["pallet_number"] for pallet_summary in pallets]
+            lot_text, notes_text, location_text, pallet_text, received_date_text = self.inventory_pallet_display_values(pallets)
             values = [
                 row["part_code"],
                 row["size"],
@@ -5524,11 +5568,11 @@ class MainWindow(QMainWindow):
                 row["finish"],
                 row["grade"],
                 str(row["sheets"]),
-                row["lot"],
+                lot_text,
                 notes_text,
                 location_text,
                 pallet_text,
-                ", ".join(placement["received_date"] for placement in placements),
+                received_date_text,
             ]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -5537,6 +5581,7 @@ class MainWindow(QMainWindow):
                     item.setData(Qt.UserRole, pallet_numbers)
                 self.inventory_table.setItem(row_index, col, item)
         self.apply_inventory_column_visibility()
+        self.inventory_table.resizeRowsToContents()
 
     def refresh_shipment_table(self) -> None:
         sort_key = self.shipment_sort_key
@@ -5690,6 +5735,13 @@ class MainWindow(QMainWindow):
             self.memo_text_popup.hide()
         QToolTip.hideText()
 
+    def clipboard_cell_text(self, text: str) -> str:
+        value = str(text or "")
+        if any(ch in value for ch in ['"', "\t", "\r", "\n"]):
+            value = value.replace('"', '""')
+            return f'"{value}"'
+        return value
+
     def is_cell_text_elided(self, table: QTableWidget, item: Optional[QTableWidgetItem]) -> bool:
         if table is None or item is None:
             return False
@@ -5829,13 +5881,13 @@ class MainWindow(QMainWindow):
                 continue
             visible_columns.append(col)
             item = table.horizontalHeaderItem(col)
-            headers.append(item.text() if item else "")
+            headers.append(self.clipboard_cell_text(item.text() if item else ""))
         lines = ["\t".join(headers)]
         for row in range(table.rowCount()):
             values = []
             for col in visible_columns:
                 item = table.item(row, col)
-                values.append(item.text() if item else "")
+                values.append(self.clipboard_cell_text(item.text() if item else ""))
             lines.append("\t".join(values))
         QApplication.clipboard().setText("\n".join(lines))
 
