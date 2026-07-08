@@ -24,6 +24,7 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 
 DATA_PATH = APP_DIR / "inventory-data.json"
+MOVE_HISTORY_PATH = APP_DIR / "move_history.json"
 ICON_PATH = APP_DIR / "icon.ico"
 STORE_LOG_PATH = APP_DIR / "store-error.log"
 APP_ID = "Yone.WarehouseApp"
@@ -40,6 +41,8 @@ TOP_VIEW_STACK_OFFSET_X = 10
 TOP_VIEW_STACK_OFFSET_Y = 8
 TOP_VIEW_SELECTED_STACK_OFFSET_X = 28
 TOP_VIEW_SELECTED_STACK_OFFSET_Y = 22
+TOP_VIEW_DRAG_THRESHOLD_PX = 10
+TOP_VIEW_DRAG_HOLD_MS = 450
 COLOR_PRESETS = {
     "AUTO": ("自動", None),
     "BLUE": ("青", "#57C1FF"),
@@ -138,6 +141,10 @@ ENTRY_WAITING_TOLERANCE = 0.035
 
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def history_now_text() -> str:
+    return datetime.now().strftime("%Y/%m/%d %H:%M:%S")
 
 
 def enable_swipe_scroll(scroll: QScrollArea) -> None:
@@ -660,6 +667,41 @@ def load_store(path: Path = DATA_PATH) -> InventoryStore:
 
     log_store_error("store recovery failed; startup stopped")
     raise StoreRecoveryError("データ破損。復旧できません", failed_paths or [path, bak_path], STORE_LOG_PATH)
+
+
+def load_move_history(path: Path = MOVE_HISTORY_PATH) -> List[dict]:
+    if not path.exists():
+        try:
+            path.write_text("[]\n", encoding="utf-8")
+        except Exception:
+            log_store_error(f"move history create failed: {path}\n{traceback.format_exc()}")
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        log_store_error(f"move history load failed: {path}\n{traceback.format_exc()}")
+        return []
+    records = payload.get("records", []) if isinstance(payload, dict) else payload
+    if not isinstance(records, list):
+        return []
+    return [record for record in records if isinstance(record, dict)]
+
+
+def save_move_history(records: List[dict], path: Path = MOVE_HISTORY_PATH) -> bool:
+    try:
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.loads(tmp_path.read_text(encoding="utf-8"))
+        tmp_path.replace(path)
+        return True
+    except Exception:
+        log_store_error(f"move history save failed: {path}\n{traceback.format_exc()}")
+        try:
+            if "tmp_path" in locals() and tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+        return False
 
 
 def show_store_recovery_dialog(error: StoreRecoveryError) -> None:
@@ -2918,6 +2960,7 @@ def color_swatch_label(color_key: str) -> QLabel:
 class TopMapWidget(QWidget):
     palletSelected = Signal(str)
     palletMoved = Signal(str, float, float, str)
+    palletNavigateRequested = Signal(int, int)
     selectionCleared = Signal()
     palletDoubleClicked = Signal(str)
     blockedLocationToggled = Signal(str, bool)
@@ -2939,6 +2982,13 @@ class TopMapWidget(QWidget):
         self.dragging_note = None
         self.is_dragging = False
         self.drag_start_point = QPoint()
+        self.pending_drag_kind: Optional[str] = None
+        self.pending_drag_id: Optional[str] = None
+        self.pending_drag_rect = QRect()
+        self.pending_drag_hold_ready = False
+        self.drag_hold_timer = QTimer(self)
+        self.drag_hold_timer.setSingleShot(True)
+        self.drag_hold_timer.timeout.connect(self.enable_pending_drag)
         self.drag_candidate_label: Optional[str] = None
         self.base_cache_pixmap: Optional[QPixmap] = None
         self.base_cache_key = None
@@ -2957,6 +3007,7 @@ class TopMapWidget(QWidget):
         self.attention_timer.timeout.connect(self.toggle_attention_state)
         self.attention_timer.start(520)
         self.setMinimumHeight(560); self.setMouseTracking(True); self.setAttribute(Qt.WA_AcceptTouchEvents, True)
+        self.setFocusPolicy(Qt.StrongFocus)
 
     def toggle_attention_state(self) -> None:
         self.attention_visible = not self.attention_visible
@@ -2987,14 +3038,14 @@ class TopMapWidget(QWidget):
 
     def draw_grid(self, painter: QPainter, bounds: QRect) -> Tuple[int, int]:
         columns = GRID_COLUMNS; rows = GRID_ROWS
-        painter.setPen(QPen(QColor("#102e4e"), 1, Qt.DotLine))
+        painter.setPen(QPen(QColor("#2f6f9f"), 2, Qt.DotLine))
         x_edges = self.grid_edges(bounds.left(), bounds.width(), columns)
         y_edges = self.grid_edges(bounds.top(), bounds.height(), rows)
         for x in x_edges:
             painter.drawLine(int(x), bounds.top(), int(x), bounds.bottom())
         for y in y_edges:
             painter.drawLine(bounds.left(), int(y), bounds.right(), int(y))
-        painter.setPen(QPen(QColor("#1a4f80"), 1)); painter.drawRect(bounds)
+        painter.setPen(QPen(QColor("#4a90c2"), 2)); painter.drawRect(bounds)
         self.draw_grid_labels(painter, bounds, columns, rows)
         return columns, rows
 
@@ -3168,6 +3219,18 @@ class TopMapWidget(QWidget):
             return self.point_from_waiting_slot(bounds, map_x, map_y)
         return QPoint(bounds.left() + int(bounds.width() * map_x), bounds.top() + int(bounds.height() * map_y))
 
+    def note_visible_location(self, note: MapNoteRecord) -> Optional[str]:
+        map_x = note.map_x if note.map_x is not None else ENTRY_MAP_X
+        map_y = note.map_y if note.map_y is not None else ENTRY_MAP_Y
+        if map_y > 1.0:
+            return None
+        col, row = normalized_map_to_grid(max(0.0, min(0.999, map_x)), max(0.0, min(0.999, map_y)))
+        return format_location_code(col, row)
+
+    def note_over_pallet(self, note: MapNoteRecord) -> bool:
+        location = self.note_visible_location(note)
+        return bool(location and self.store.pallets_at_location(location))
+
     def nearest_location(self, point: QPoint) -> Optional[str]:
         if not self.location_rects:
             return None
@@ -3212,7 +3275,7 @@ class TopMapWidget(QWidget):
     def tooltip_text(self, pallet: PalletRecord) -> str:
         return pallet_popup_text(self.store, pallet)
 
-    def draw_note(self, painter: QPainter, note: MapNoteRecord, rect: QRect) -> None:
+    def draw_note(self, painter: QPainter, note: MapNoteRecord, rect: QRect, pass_through: bool = False) -> None:
         painter.save()
         selected = note.note_id == self.selected_note
         active = note.note_id == self.dragging_note or selected
@@ -3222,6 +3285,19 @@ class TopMapWidget(QWidget):
         hatch = QColor(base_color.lighter(125))
         hatch.setAlpha(170)
         outline = QColor("#fff8c9" if active else base_color.lighter(115))
+        if pass_through and not selected:
+            marker = QRect(rect.left() + 4, rect.top() + 4, min(46, max(34, rect.width() - 8)), 18)
+            painter.setBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), 72))
+            painter.setPen(QPen(outline, 3))
+            painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 4, 4)
+            painter.setBrush(QColor(7, 17, 31, 220))
+            painter.setPen(QPen(outline, 2))
+            painter.drawRoundedRect(marker, 5, 5)
+            painter.setPen(QColor("#fff8c9"))
+            painter.setFont(QFont("Yu Gothic UI", 7, QFont.Bold))
+            painter.drawText(marker, Qt.AlignCenter, "メモ")
+            painter.restore()
+            return
         if selected and self.attention_visible:
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(QColor("#7fd0ff"), 4, Qt.DashLine))
@@ -3267,13 +3343,25 @@ class TopMapWidget(QWidget):
         painter.drawText(rect.adjusted(7, 24, -7, -6), Qt.AlignTop | Qt.AlignLeft | Qt.TextWordWrap, preview[:32])
         painter.restore()
 
-    def draw_pallet(self, painter: QPainter, pallet: PalletRecord, rect: QRect, stack_index: int = 0, stack_count: int = 1) -> None:
+    def draw_pallet(self, painter: QPainter, pallet: PalletRecord, rect: QRect, stack_index: int = 0, stack_count: int = 1, force_detail: bool = False) -> None:
         multi_selected = pallet.pallet_number in self.selected_pallets
         active = pallet.pallet_number in {self.selected_pallet, self.hover_pallet, self.dragging_pallet} or multi_selected
         selected = pallet.pallet_number == self.selected_pallet or multi_selected
         waiting_move = is_entry_staged_pallet(pallet)
         color = pallet_color(pallet); fill = QColor(color); fill.setAlpha(42)
         outline = QColor(color.lighter(145) if active else color)
+        if not selected and not force_detail:
+            painter.setBrush(fill)
+            painter.setPen(QPen(outline, 2 if active else 1))
+            painter.drawRoundedRect(rect, 5, 5)
+            count_text = str(max(1, stack_count))
+            font_size = max(16, min(30, int(rect.height() * 0.62), int(rect.width() * 0.48)))
+            painter.setFont(QFont("Yu Gothic UI", font_size, QFont.Bold))
+            painter.setPen(QColor(2, 9, 15, 210))
+            painter.drawText(rect.adjusted(2, 2, 2, 2), Qt.AlignCenter, count_text)
+            painter.setPen(QColor("#f6fbff"))
+            painter.drawText(rect, Qt.AlignCenter, count_text)
+            return
         if selected and self.attention_visible:
             selected_pulse = rect.adjusted(-12, -12, 12, 12)
             selected_color = QColor("#7fd0ff")
@@ -3364,6 +3452,7 @@ class TopMapWidget(QWidget):
             key = pallet.pallet_number if self.store.is_entry_waiting_pallet(pallet) else normalize_location_code(pallet.location_code)
             group_index[pallet.pallet_number] = group_counts.get(key, 0)
             group_counts[key] = group_counts.get(key, 0) + 1
+        drawn_compact_groups: set[str] = set()
         for pallet in sorted(self.store.pallets, key=lambda p: (p.location_code, p.stack_order, p.pallet_number)):
             width_mm, depth_mm = footprint_mm(pallet)
             base_point = self.point_from_pallet(pallet)
@@ -3371,6 +3460,16 @@ class TopMapWidget(QWidget):
             stack_index = group_index.get(pallet.pallet_number, pallet.stack_order)
             group_key = pallet.pallet_number if self.store.is_entry_waiting_pallet(pallet) else normalize_location_code(pallet.location_code)
             selected_stack = selected_group_key is not None and group_key == selected_group_key and group_counts.get(group_key, 1) > 1
+            if not selected_stack:
+                rect = QRect(base_point.x() - int(width_mm * scale / 2), base_point.y() - int(depth_mm * scale / 2), max(18, int(width_mm * scale)), max(14, int(depth_mm * scale)))
+                if self.dragging_pallet == pallet.pallet_number:
+                    rect.moveTo(self.drag_point - self.drag_offset)
+                self.pallet_rects[pallet.pallet_number] = rect
+                if group_key in drawn_compact_groups or pallet.pallet_number == exclude_pallet:
+                    continue
+                drawn_compact_groups.add(group_key)
+                self.draw_pallet(painter, pallet, rect, stack_index=0, stack_count=group_counts.get(group_key, 1))
+                continue
             shift_x = TOP_VIEW_SELECTED_STACK_OFFSET_X if selected_stack else TOP_VIEW_STACK_OFFSET_X
             shift_y = TOP_VIEW_SELECTED_STACK_OFFSET_Y if selected_stack else TOP_VIEW_STACK_OFFSET_Y
             if pallet.pallet_number != exclude_pallet and selected_stack and stack_index > 0:
@@ -3382,7 +3481,7 @@ class TopMapWidget(QWidget):
                 rect.moveTo(self.drag_point - self.drag_offset)
             self.pallet_rects[pallet.pallet_number] = rect
             if pallet.pallet_number != exclude_pallet:
-                self.draw_pallet(painter, pallet, rect, stack_index=stack_index, stack_count=group_counts.get(group_key, 1))
+                self.draw_pallet(painter, pallet, rect, stack_index=stack_index, stack_count=group_counts.get(group_key, 1), force_detail=True)
         for note in sorted(self.store.map_notes, key=lambda item: item.updated_at):
             width_mm, depth_mm = footprint_mm_for_size(note.size)
             base_point = self.point_from_note(note)
@@ -3392,7 +3491,7 @@ class TopMapWidget(QWidget):
                 rect.moveTo(self.drag_point - self.drag_offset)
             self.note_rects[note.note_id] = rect
             if note.note_id != exclude_note:
-                self.draw_note(painter, note, rect)
+                self.draw_note(painter, note, rect, pass_through=self.note_over_pallet(note))
         if saved_state is not None:
             self.selected_pallet, self.selected_pallets, self.selected_note, self.hover_pallet, self.hover_note, self.dragging_pallet, self.dragging_note, self.attention_visible = saved_state
 
@@ -3518,6 +3617,7 @@ class TopMapWidget(QWidget):
         painter.end()
 
     def mousePressEvent(self, event) -> None:
+        self.setFocus(Qt.MouseFocusReason)
         point = event.position().toPoint()
         if event.button() == Qt.RightButton:
             for note_id, rect in self.note_rects.items():
@@ -3598,55 +3698,76 @@ class TopMapWidget(QWidget):
                 return
 
     def begin_drag_at(self, point: QPoint) -> bool:
-        for note_id, rect in self.note_rects.items():
-            if rect.contains(point):
-                self.selected_note = note_id
-                self.selected_pallet = None
-                self.selected_pallets = set()
-                self.dragging_note = note_id
-                self.is_dragging = True
-                self.drag_start_point = point
-                self.drag_offset = point - rect.topLeft()
-                self.drag_point = point
-                if self.is_dragging:
-                    self.drag_candidate_label = self.candidate_label_at(point)
-                self.hover_target = None
-                self.hover_note = None
-                self.drag_cache_pixmap = None
-                self.drag_cache_pallet = None
-                self.drag_cache_note = None
-                self.setToolTip("")
-                QToolTip.hideText()
-                self.setCursor(Qt.ArrowCursor)
-                self.dragStarted.emit()
-                self.rebuild_drag_cache()
-                self.update()
-                return True
         for pallet_number, rect in self.pallet_rects.items():
             if rect.contains(point):
                 self.selected_pallet = pallet_number
                 self.selected_pallets = {pallet_number}
                 self.selected_note = None
-                self.dragging_pallet = pallet_number
-                self.is_dragging = True
-                self.drag_start_point = point
-                self.drag_offset = point - rect.topLeft()
-                self.drag_point = point
-                if self.is_dragging:
-                    self.drag_candidate_label = self.candidate_label_at(point)
-                self.hover_target = None
-                self.hover_note = None
-                self.drag_cache_pixmap = None
-                self.drag_cache_pallet = None
-                self.drag_cache_note = None
-                self.setToolTip("")
-                QToolTip.hideText()
-                self.setCursor(Qt.ArrowCursor)
-                self.dragStarted.emit()
-                self.rebuild_drag_cache()
-                self.update()
+                self.start_pending_drag("pallet", pallet_number, rect, point)
+                return True
+        for note_id, rect in self.note_rects.items():
+            if rect.contains(point):
+                self.selected_note = note_id
+                self.selected_pallet = None
+                self.selected_pallets = set()
+                self.start_pending_drag("note", note_id, rect, point)
                 return True
         return False
+
+    def start_pending_drag(self, kind: str, target_id: str, rect: QRect, point: QPoint) -> None:
+        self.pending_drag_kind = kind
+        self.pending_drag_id = target_id
+        self.pending_drag_rect = QRect(rect)
+        self.pending_drag_hold_ready = False
+        self.drag_start_point = point
+        self.drag_offset = point - rect.topLeft()
+        self.drag_point = point
+        self.hover_target = None
+        self.hover_pallet = None
+        self.hover_note = None
+        self.setToolTip("")
+        QToolTip.hideText()
+        self.setCursor(Qt.PointingHandCursor)
+        self.drag_hold_timer.start(TOP_VIEW_DRAG_HOLD_MS)
+        self.update()
+
+    def enable_pending_drag(self) -> None:
+        self.pending_drag_hold_ready = True
+        if self.pending_drag_kind and (self.drag_point - self.drag_start_point).manhattanLength() >= TOP_VIEW_DRAG_THRESHOLD_PX:
+            self.activate_pending_drag()
+
+    def activate_pending_drag(self) -> bool:
+        if self.is_dragging or not self.pending_drag_kind or not self.pending_drag_id:
+            return False
+        if not self.pending_drag_hold_ready:
+            return False
+        if (self.drag_point - self.drag_start_point).manhattanLength() < TOP_VIEW_DRAG_THRESHOLD_PX:
+            return False
+        if self.pending_drag_kind == "note":
+            self.dragging_note = self.pending_drag_id
+            self.dragging_pallet = None
+        elif self.pending_drag_kind == "pallet":
+            self.dragging_pallet = self.pending_drag_id
+            self.dragging_note = None
+        else:
+            return False
+        self.is_dragging = True
+        self.drag_candidate_label = self.candidate_label_at(self.drag_point)
+        self.drag_cache_pixmap = None
+        self.drag_cache_pallet = None
+        self.drag_cache_note = None
+        self.setCursor(Qt.ArrowCursor)
+        self.dragStarted.emit()
+        self.rebuild_drag_cache()
+        self.request_drag_update(None, self.current_drag_update_rect())
+        return True
+
+    def cancel_pending_drag(self) -> None:
+        self.drag_hold_timer.stop()
+        self.pending_drag_kind = None
+        self.pending_drag_id = None
+        self.pending_drag_rect = QRect()
+        self.pending_drag_hold_ready = False
 
     def current_drag_rect(self) -> Optional[QRect]:
         source_rect = None
@@ -3681,6 +3802,11 @@ class TopMapWidget(QWidget):
     def update_drag_at(self, point: QPoint) -> None:
         old_drag_rect = self.current_drag_update_rect() if self.is_dragging else None
         self.drag_point = point
+        if self.pending_drag_kind and not self.is_dragging:
+            if self.activate_pending_drag():
+                return
+            self.update()
+            return
         if self.is_dragging:
             self.drag_candidate_label = self.candidate_label_at(point)
         if self.is_dragging and self.dragging_note:
@@ -3693,14 +3819,14 @@ class TopMapWidget(QWidget):
             return
         hit = None
         note_hit = None
-        for note_id, rect in reversed(list(self.note_rects.items())):
+        for pallet_number, rect in reversed(list(self.pallet_rects.items())):
             if rect.contains(point):
-                note_hit = note_id
+                hit = pallet_number
                 break
-        if note_hit is None:
-            for pallet_number, rect in reversed(list(self.pallet_rects.items())):
+        if hit is None:
+            for note_id, rect in reversed(list(self.note_rects.items())):
                 if rect.contains(point):
-                    hit = pallet_number
+                    note_hit = note_id
                     break
         new_hover_target = ("note", note_hit) if note_hit else (("pallet", hit) if hit else None)
         if new_hover_target == self.hover_target:
@@ -3725,6 +3851,7 @@ class TopMapWidget(QWidget):
         self.update()
 
     def finish_drag_state(self, pallet_number: Optional[str], show_detail: bool = False) -> None:
+        self.cancel_pending_drag()
         self.dragging_pallet = None
         self.dragging_note = None
         self.hover_target = None
@@ -3745,10 +3872,21 @@ class TopMapWidget(QWidget):
         self.update()
 
     def end_drag_at(self, point: QPoint) -> None:
+        if self.pending_drag_kind and not self.is_dragging:
+            kind = self.pending_drag_kind
+            target_id = self.pending_drag_id
+            self.cancel_pending_drag()
+            if kind == "note" and target_id:
+                QTimer.singleShot(0, lambda nid=target_id: self.mapNoteSelected.emit(nid))
+            elif kind == "pallet" and target_id:
+                self.finish_drag_state(target_id, show_detail=True)
+            else:
+                self.update()
+            return
         if self.dragging_note:
             dragged_note = self.dragging_note
             moved = (point - self.drag_start_point).manhattanLength()
-            if moved <= 6:
+            if moved < TOP_VIEW_DRAG_THRESHOLD_PX:
                 QTimer.singleShot(0, lambda nid=dragged_note: self.mapNoteSelected.emit(nid))
             else:
                 note = self.store.get_map_note(dragged_note)
@@ -3770,7 +3908,7 @@ class TopMapWidget(QWidget):
             return
         dragged_pallet = self.dragging_pallet
         moved = (point - self.drag_start_point).manhattanLength()
-        if moved <= 6:
+        if moved < TOP_VIEW_DRAG_THRESHOLD_PX:
             self.finish_drag_state(dragged_pallet, show_detail=True)
             return
         destination = self.nearest_location(point)
@@ -3786,8 +3924,10 @@ class TopMapWidget(QWidget):
             if not points:
                 self.touch_zoom_distance = None
                 self.touch_zoom_midpoint = None
+                self.cancel_pending_drag()
                 self.is_dragging = False
                 self.dragging_note = None
+                self.dragging_pallet = None
                 return True
             if event.type() == QEvent.TouchEnd:
                 if self.touch_zoom_distance is not None:
@@ -3823,6 +3963,20 @@ class TopMapWidget(QWidget):
                 self.update_drag_at(point)
             return True
         return super().event(event)
+
+    def keyPressEvent(self, event) -> None:
+        key_map = {
+            Qt.Key_Up: (0, -1),
+            Qt.Key_Down: (0, 1),
+            Qt.Key_Left: (-1, 0),
+            Qt.Key_Right: (1, 0),
+        }
+        if event.key() in key_map:
+            dx, dy = key_map[event.key()]
+            self.palletNavigateRequested.emit(dx, dy)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def resizeEvent(self, event) -> None:
         self.invalidate_base_cache()
@@ -4244,9 +4398,26 @@ class MainWindow(QMainWindow):
         ("created_at", "追加日", 160),
     ]
     MEMO_TEXT_COLUMN = 2
+    HISTORY_COLUMNS = [
+        ("timestamp", "操作日時", 150),
+        ("action", "操作内容", 80),
+        ("part_code", "品番", 110),
+        ("size", "サイズ", 70),
+        ("thickness", "厚み", 76),
+        ("finish", "加工 / 裏表", 120),
+        ("grade", "グレード", 76),
+        ("lot", "Lot", 110),
+        ("sheet_count", "枚数", 70),
+        ("from_location", "移動前 保管場所", 140),
+        ("to_location", "移動後 保管場所", 140),
+        ("from_pallet", "移動前 パレット番号", 150),
+        ("to_pallet", "移動後 パレット番号", 150),
+        ("note", "備考", 180),
+    ]
 
     def __init__(self) -> None:
         super().__init__(); data_file_existed_at_startup = DATA_PATH.exists(); self.store = load_store(); create_startup_daily_backup(DATA_PATH, data_file_existed_at_startup); self.current_pallet_number = None; self.current_note_id = None
+        self.move_history_records: List[dict] = load_move_history()
         self.last_registration_item_cache: Optional[InventoryItemLine] = None
         self.move_undo_stack: List[MoveAction] = []
         self.move_redo_stack: List[MoveAction] = []
@@ -4258,6 +4429,11 @@ class MainWindow(QMainWindow):
         self.memo_sort_key = "location"
         self.memo_sort_desc = False
         self.settings = QSettings(APP_ID, "WarehouseApp")
+        self.top_navigation_manual_pos: Optional[QPoint] = self.load_top_navigation_position()
+        self.top_navigation_press_global = QPoint()
+        self.top_navigation_press_pos = QPoint()
+        self.top_navigation_drag_active = False
+        self.top_navigation_pressed_button: Optional[QPushButton] = None
         hidden_columns = str(self.settings.value("inventory_hidden_columns", "") or "")
         self.inventory_hidden_columns: set[int] = {
             int(value) for value in hidden_columns.split(",") if value.isdigit()
@@ -4410,7 +4586,8 @@ class MainWindow(QMainWindow):
         resize_row.addStretch(1)
         resize_row.addWidget(self.detail_resize_handle)
         detail_root.addLayout(resize_row)
-        self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.set_blocked_location_with_validation); self.top_map.palletContextRequested.connect(self.open_pallet_context_menu); self.top_map.mapNoteSelected.connect(self.select_map_note); self.top_map.mapNoteDoubleClicked.connect(self.open_map_note_editor); self.top_map.mapNoteMoved.connect(self.move_map_note); self.top_map.mapNoteContextRequested.connect(self.open_map_note_context_menu); self.top_map.dragStarted.connect(self.hide_detail_for_drag); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
+        self.top_map = TopMapWidget(self.store); self.top_map.palletSelected.connect(self.select_pallet); self.top_map.palletMoved.connect(self.move_pallet); self.top_map.palletNavigateRequested.connect(self.navigate_selected_pallet); self.top_map.selectionCleared.connect(self.clear_selection); self.top_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.top_map.blockedLocationToggled.connect(self.set_blocked_location_with_validation); self.top_map.palletContextRequested.connect(self.open_pallet_context_menu); self.top_map.mapNoteSelected.connect(self.select_map_note); self.top_map.mapNoteDoubleClicked.connect(self.open_map_note_editor); self.top_map.mapNoteMoved.connect(self.move_map_note); self.top_map.mapNoteContextRequested.connect(self.open_map_note_context_menu); self.top_map.dragStarted.connect(self.hide_detail_for_drag); self.tabs.addTab(self.wrap_widget(self.top_map), "真上")
+        self.build_top_navigation_controls()
         self.iso_map = IsometricMapWidget(self.store); self.iso_map.palletSelected.connect(self.select_pallet); self.iso_map.selectionCleared.connect(self.clear_selection); self.iso_map.palletDoubleClicked.connect(self.open_selected_pallet_editor); self.iso_map.palletContextRequested.connect(self.open_pallet_context_menu)
         self.iso_rotate_button = QPushButton("視点90°")
         self.iso_rotate_button.setParent(self.iso_map)
@@ -4535,6 +4712,43 @@ class MainWindow(QMainWindow):
         self.memo_table.currentItemChanged.connect(lambda current, _previous: QTimer.singleShot(0, lambda: self.show_memo_content_popup(current.row() if current is not None else -1)))
         self.memo_table.itemEntered.connect(lambda item: self.show_table_item_tooltip(self.memo_table, item))
         self.memo_table.currentItemChanged.connect(lambda current, _previous: self.show_table_item_tooltip(self.memo_table, current))
+        self.history_table = QTableWidget(0, len(self.HISTORY_COLUMNS))
+        self.history_table.setObjectName("historyTable")
+        self.history_table.setHorizontalHeaderLabels([label for _key, label, _width in self.HISTORY_COLUMNS])
+        history_header = TouchFriendlyHeaderView(Qt.Horizontal, self.history_table)
+        self.history_table.setHorizontalHeader(history_header)
+        self.history_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.history_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.history_table.setShowGrid(True)
+        self.history_table.setGridStyle(Qt.SolidLine)
+        self.history_table.setAlternatingRowColors(True)
+        self.history_table.setMouseTracking(True)
+        self.history_table.viewport().installEventFilter(self)
+        self.history_table.horizontalHeader().setSectionsMovable(False)
+        self.history_table.horizontalHeader().setSectionsClickable(False)
+        self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        self.history_table.horizontalHeader().setMinimumSectionSize(72)
+        self.history_table.horizontalHeader().setMinimumHeight(42)
+        self.history_table.verticalHeader().setDefaultSectionSize(38)
+        self.configure_table_for_touch(self.history_table)
+        for col, (_key, _label, width) in enumerate(self.HISTORY_COLUMNS):
+            self.history_table.setColumnWidth(col, width)
+        history_hint = QLabel(f"移動履歴は在庫データとは別に {MOVE_HISTORY_PATH.name} へ保存されます。")
+        history_hint.setObjectName("inventoryHint")
+        history_hint.setWordWrap(True)
+        history_shell = QWidget()
+        history_layout = QVBoxLayout(history_shell)
+        history_layout.setContentsMargins(8, 8, 8, 8)
+        history_layout.setSpacing(6)
+        history_layout.addWidget(history_hint)
+        history_layout.addWidget(self.history_table, 1)
+        self.tabs.addTab(history_shell, "履歴")
+        self.history_table.cellClicked.connect(lambda row, col: self.show_table_cell_tooltip(self.history_table, row, col))
+        self.history_table.cellPressed.connect(lambda row, col: QTimer.singleShot(0, lambda: self.show_table_cell_popup_if_elided(self.history_table, row, col)))
+        self.history_table.itemPressed.connect(lambda item: QTimer.singleShot(0, lambda: self.show_table_item_popup(self.history_table, item)))
+        self.history_table.itemEntered.connect(lambda item: self.show_table_item_tooltip(self.history_table, item))
+        self.history_table.currentItemChanged.connect(lambda current, _previous: self.show_table_item_tooltip(self.history_table, current))
         self.help_page = self.build_help_page(); self.help_tab_widget = self.wrap_widget(self.help_page); self.tabs.addTab(self.help_tab_widget, "ヘルプ")
         self.update_tab_visuals()
         self.apply_responsive_layout()
@@ -4601,6 +4815,200 @@ class MainWindow(QMainWindow):
     def wrap_widget(self, widget: QWidget) -> QWidget:
         shell = QWidget(); layout = QVBoxLayout(shell); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(widget); return shell
 
+    def build_top_navigation_controls(self) -> None:
+        self.top_navigation_controls = QFrame(self.top_map)
+        self.top_navigation_controls.setObjectName("topNavigationControls")
+        self.top_navigation_controls.setCursor(Qt.SizeAllCursor)
+        self.top_navigation_controls.setAttribute(Qt.WA_AcceptTouchEvents, True)
+        self.top_navigation_controls.installEventFilter(self)
+        layout = QGridLayout(self.top_navigation_controls)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+        buttons = [
+            ("↑", 1, 0, 0, -1),
+            ("←", 0, 1, -1, 0),
+            ("→", 2, 1, 1, 0),
+            ("↓", 1, 2, 0, 1),
+        ]
+        self.top_navigation_buttons: List[QPushButton] = []
+        for text, col, row, dx, dy in buttons:
+            button = QPushButton(text, self.top_navigation_controls)
+            button.setObjectName("topNavigationButton")
+            button.setFixedSize(66, 66)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setAttribute(Qt.WA_AcceptTouchEvents, True)
+            button.setProperty("nav_dx", dx)
+            button.setProperty("nav_dy", dy)
+            button.installEventFilter(self)
+            layout.addWidget(button, row, col)
+            self.top_navigation_buttons.append(button)
+        self.top_navigation_controls.adjustSize()
+        self.top_navigation_controls.raise_()
+        self.update_top_navigation_controls_geometry()
+
+    def update_top_navigation_controls_geometry(self) -> None:
+        if not hasattr(self, "top_navigation_controls") or not hasattr(self, "top_map"):
+            return
+        self.top_navigation_controls.adjustSize()
+        margin = 18
+        if self.top_navigation_manual_pos is None:
+            x = max(margin, self.top_map.width() - self.top_navigation_controls.width() - margin)
+            y = max(margin, self.top_map.height() - self.top_navigation_controls.height() - margin)
+        else:
+            x = self.top_navigation_manual_pos.x()
+            y = self.top_navigation_manual_pos.y()
+        clamped = self.clamped_top_navigation_position(QPoint(x, y))
+        self.top_navigation_controls.move(clamped)
+        self.top_navigation_controls.raise_()
+
+    def clamped_top_navigation_position(self, pos: QPoint) -> QPoint:
+        if not hasattr(self, "top_navigation_controls") or not hasattr(self, "top_map"):
+            return pos
+        margin = 6
+        max_x = max(margin, self.top_map.width() - self.top_navigation_controls.width() - margin)
+        max_y = max(margin, self.top_map.height() - self.top_navigation_controls.height() - margin)
+        return QPoint(max(margin, min(pos.x(), max_x)), max(margin, min(pos.y(), max_y)))
+
+    def load_top_navigation_position(self) -> Optional[QPoint]:
+        value = str(self.settings.value("top_navigation_controls_pos", "") or "")
+        match = re.fullmatch(r"\s*(-?\d+)\s*,\s*(-?\d+)\s*", value)
+        if not match:
+            return None
+        return QPoint(int(match.group(1)), int(match.group(2)))
+
+    def save_top_navigation_position(self) -> None:
+        if self.top_navigation_manual_pos is None:
+            self.settings.remove("top_navigation_controls_pos")
+            return
+        self.settings.setValue("top_navigation_controls_pos", f"{self.top_navigation_manual_pos.x()},{self.top_navigation_manual_pos.y()}")
+
+    def top_navigation_button_at_global(self, global_pos: QPoint) -> Optional[QPushButton]:
+        for button in getattr(self, "top_navigation_buttons", []):
+            local = button.mapFromGlobal(global_pos)
+            if button.rect().contains(local):
+                return button
+        return None
+
+    def handle_top_navigation_event(self, source, event) -> bool:
+        controls = getattr(self, "top_navigation_controls", None)
+        buttons = set(getattr(self, "top_navigation_buttons", []))
+        if controls is None or source not in buttons | {controls}:
+            return False
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            self.top_navigation_press_global = event.globalPosition().toPoint()
+            self.top_navigation_press_pos = controls.pos()
+            self.top_navigation_drag_active = False
+            self.top_navigation_pressed_button = source if source in buttons else None
+            if self.top_navigation_pressed_button is not None:
+                self.top_navigation_pressed_button.setDown(True)
+            controls.raise_()
+            return True
+        if event.type() == QEvent.TouchBegin:
+            points = event.points()
+            if not points:
+                return True
+            self.top_navigation_press_global = points[0].globalPosition().toPoint()
+            self.top_navigation_press_pos = controls.pos()
+            self.top_navigation_drag_active = False
+            self.top_navigation_pressed_button = source if source in buttons else None
+            if self.top_navigation_pressed_button is not None:
+                self.top_navigation_pressed_button.setDown(True)
+            controls.raise_()
+            return True
+        if event.type() == QEvent.MouseMove and event.buttons() & Qt.LeftButton:
+            current_global = event.globalPosition().toPoint()
+            delta = current_global - self.top_navigation_press_global
+            if delta.manhattanLength() >= 12:
+                self.top_navigation_drag_active = True
+                if self.top_navigation_pressed_button is not None:
+                    self.top_navigation_pressed_button.setDown(False)
+                clamped = self.clamped_top_navigation_position(self.top_navigation_press_pos + delta)
+                controls.move(clamped)
+                controls.raise_()
+            return True
+        if event.type() == QEvent.TouchUpdate:
+            points = event.points()
+            if not points:
+                return True
+            current_global = points[0].globalPosition().toPoint()
+            delta = current_global - self.top_navigation_press_global
+            if delta.manhattanLength() >= 12:
+                self.top_navigation_drag_active = True
+                if self.top_navigation_pressed_button is not None:
+                    self.top_navigation_pressed_button.setDown(False)
+                clamped = self.clamped_top_navigation_position(self.top_navigation_press_pos + delta)
+                controls.move(clamped)
+                controls.raise_()
+            return True
+        if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            current_global = event.globalPosition().toPoint()
+            pressed = self.top_navigation_pressed_button
+            if pressed is not None:
+                pressed.setDown(False)
+            if self.top_navigation_drag_active:
+                self.top_navigation_manual_pos = QPoint(controls.pos())
+                self.save_top_navigation_position()
+            elif pressed is not None and self.top_navigation_button_at_global(current_global) is pressed:
+                dx = int(pressed.property("nav_dx") or 0)
+                dy = int(pressed.property("nav_dy") or 0)
+                self.navigate_selected_pallet(dx, dy)
+            self.top_navigation_drag_active = False
+            self.top_navigation_pressed_button = None
+            return True
+        if event.type() == QEvent.TouchEnd:
+            points = event.points()
+            current_global = points[0].globalPosition().toPoint() if points else self.top_navigation_press_global
+            pressed = self.top_navigation_pressed_button
+            if pressed is not None:
+                pressed.setDown(False)
+            if self.top_navigation_drag_active:
+                self.top_navigation_manual_pos = QPoint(controls.pos())
+                self.save_top_navigation_position()
+            elif pressed is not None and self.top_navigation_button_at_global(current_global) is pressed:
+                dx = int(pressed.property("nav_dx") or 0)
+                dy = int(pressed.property("nav_dy") or 0)
+                self.navigate_selected_pallet(dx, dy)
+            self.top_navigation_drag_active = False
+            self.top_navigation_pressed_button = None
+            return True
+        if event.type() == QEvent.MouseButtonRelease:
+            self.top_navigation_drag_active = False
+            if self.top_navigation_pressed_button is not None:
+                self.top_navigation_pressed_button.setDown(False)
+            self.top_navigation_pressed_button = None
+            return True
+        return False
+
+    def navigate_selected_pallet(self, dx: int, dy: int) -> None:
+        pallet = self.store.get_pallet(self.current_pallet_number or "")
+        if pallet is None:
+            QToolTip.showText(self.top_navigation_controls.mapToGlobal(self.top_navigation_controls.rect().center()), "先にパレットを選択してください。", self.top_navigation_controls)
+            return
+        if (dx == 0 and dy == 0) or (dx != 0 and dy != 0):
+            return
+        current_location = current_visible_location_for_pallet(pallet)
+        if not current_location:
+            return
+        col, row = location_to_grid(current_location)
+        target_col = col
+        target_row = row
+        while True:
+            target_col += dx
+            target_row += dy
+            if target_col < 0 or target_col >= GRID_COLUMNS or target_row < 0 or target_row >= GRID_ROWS:
+                QToolTip.showText(self.top_navigation_controls.mapToGlobal(self.top_navigation_controls.rect().center()), "その方向にパレットがありません。", self.top_navigation_controls)
+                return
+            target_location = format_location_code(target_col, target_row)
+            candidates = self.store.pallets_at_location(target_location)
+            if not candidates:
+                continue
+            candidates.sort(key=lambda item: (abs(item.stack_order - pallet.stack_order), item.stack_order, item.pallet_number))
+            self.select_pallet(candidates[0].pallet_number)
+            self.tabs.setCurrentIndex(0)
+            self.top_map.setFocus(Qt.ShortcutFocusReason)
+            return
+
     def active_map_widget(self) -> Optional[QWidget]:
         if not hasattr(self, "tabs"):
             return None
@@ -4656,22 +5064,26 @@ class MainWindow(QMainWindow):
         inventory_color = QColor("#39d98a")
         shipment_color = QColor("#ff8a80")
         memo_color = QColor("#62d6c8")
+        history_color = QColor("#f0b35b")
         help_color = QColor("#ffd37a")
         tab_bar.setTabTextColor(0, QColor("#88c3f0"))
         tab_bar.setTabTextColor(1, QColor("#88c3f0"))
         tab_bar.setTabTextColor(2, inventory_color)
         tab_bar.setTabTextColor(3, shipment_color)
         tab_bar.setTabTextColor(4, memo_color)
-        tab_bar.setTabTextColor(5, help_color)
+        tab_bar.setTabTextColor(5, history_color)
+        tab_bar.setTabTextColor(6, help_color)
         self.tabs.setTabIcon(2, solid_circle_icon(inventory_color.name()))
         self.tabs.setTabIcon(3, solid_circle_icon(shipment_color.name()))
         self.tabs.setTabIcon(4, solid_circle_icon(memo_color.name()))
-        self.tabs.setTabIcon(5, solid_circle_icon(help_color.name()))
+        self.tabs.setTabIcon(5, solid_circle_icon(history_color.name()))
+        self.tabs.setTabIcon(6, solid_circle_icon(help_color.name()))
 
     def handle_tab_changed(self, _index: int) -> None:
         is_inventory = self.tabs.currentIndex() == 2
         is_shipment = self.tabs.currentIndex() == 3
         is_memo = hasattr(self, "memo_table") and self.tabs.currentIndex() == 4
+        is_history = hasattr(self, "history_table") and self.tabs.currentIndex() == 5
         is_help = hasattr(self, "help_tab_widget") and self.tabs.currentWidget() == self.help_tab_widget
         self.search_input.setVisible(is_inventory or is_shipment)
         self.inventory_columns_button.setVisible(is_inventory)
@@ -4684,6 +5096,8 @@ class MainWindow(QMainWindow):
             self.iso_rotate_button.setVisible(self.tabs.currentIndex() == 1)
         if is_memo:
             self.refresh_memo_table()
+        if is_history:
+            self.refresh_history_table()
         if is_help and isinstance(self.help_page, QScrollArea):
             self.help_page.verticalScrollBar().setValue(0)
         self.update_detail_overlay_geometry()
@@ -4711,7 +5125,7 @@ class MainWindow(QMainWindow):
         table.setDragDropMode(QAbstractItemView.NoDragDrop)
 
     def table_for_viewport(self, source) -> Optional[QTableWidget]:
-        for table in (getattr(self, "inventory_table", None), getattr(self, "shipment_table", None), getattr(self, "memo_table", None)):
+        for table in (getattr(self, "inventory_table", None), getattr(self, "shipment_table", None), getattr(self, "memo_table", None), getattr(self, "history_table", None)):
             if table is not None and source == table.viewport():
                 return table
         return None
@@ -4756,11 +5170,14 @@ class MainWindow(QMainWindow):
         inventory_table = getattr(self, "inventory_table", None)
         shipment_table = getattr(self, "shipment_table", None)
         memo_table = getattr(self, "memo_table", None)
+        history_table = getattr(self, "history_table", None)
         map_container = getattr(self, "map_container", None)
         tabs = getattr(self, "tabs", None)
         current_page = stack_detail_pages.currentWidget() if stack_detail_pages is not None else None
         current_label = current_page.findChild(QLabel) if current_page is not None else None
         current_scroll = current_page.findChild(QScrollArea) if current_page is not None else None
+        if self.handle_top_navigation_event(source, event):
+            return True
         draggable_sources = {detail_frame, stack_detail_pages, current_page, current_label}
         if current_scroll is not None:
             draggable_sources.add(current_scroll)
@@ -4772,6 +5189,8 @@ class MainWindow(QMainWindow):
             popup_tables[shipment_table.viewport()] = shipment_table
         if memo_table is not None:
             popup_tables[memo_table.viewport()] = memo_table
+        if history_table is not None:
+            popup_tables[history_table.viewport()] = history_table
         popup_table = popup_tables.get(source)
         touch_table = self.table_for_viewport(source)
         if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
@@ -4816,7 +5235,7 @@ class MainWindow(QMainWindow):
                 self.table_long_press_table = None
         if event.type() in (QEvent.MouseButtonPress, QEvent.TouchBegin):
             allowed_sources = set(popup_tables.keys())
-            allowed_sources.update({inventory_table, shipment_table, memo_table, self.cell_popup, self.memo_text_popup, self.memo_text_popup.viewport()})
+            allowed_sources.update({inventory_table, shipment_table, memo_table, history_table, self.cell_popup, self.memo_text_popup, self.memo_text_popup.viewport()})
             if source not in allowed_sources:
                 self.hide_table_popup()
         if popup_table is not None:
@@ -4936,6 +5355,7 @@ class MainWindow(QMainWindow):
             self.iso_rotate_button.setFixedHeight(30 if compact else 34)
             self.iso_rotate_button.adjustSize()
             self.iso_rotate_button.move(max(10, self.iso_map.width() - self.iso_rotate_button.width() - 14), 12)
+        self.update_top_navigation_controls_geometry()
         self.update_stack_detail_style()
 
     def update_detail_overlay_geometry(self) -> None:
@@ -4991,6 +5411,7 @@ class MainWindow(QMainWindow):
         self.detail_frame.setGeometry(x, y, width + selector_width + 8, detail_height)
         self.detail_frame.raise_()
         self.detail_frame.show()
+        self.update_top_navigation_controls_geometry()
 
     def hide_detail_for_drag(self) -> None:
         if hasattr(self, "detail_frame"):
@@ -5001,11 +5422,29 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self.apply_responsive_layout()
         self.update_detail_overlay_geometry()
+        self.update_top_navigation_controls_geometry()
+
+    def keyPressEvent(self, event) -> None:
+        key_map = {
+            Qt.Key_Up: (0, -1),
+            Qt.Key_Down: (0, 1),
+            Qt.Key_Left: (-1, 0),
+            Qt.Key_Right: (1, 0),
+        }
+        if self.tabs.currentIndex() == 0 and event.key() in key_map:
+            dx, dy = key_map[event.key()]
+            self.navigate_selected_pallet(dx, dy)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def apply_theme(self) -> None:
         self.setStyleSheet("""
         QWidget { background:#091522; color:#e7f3ff; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }
         QFrame { background:#0f1d2c; border:1px solid #163450; border-radius:8px; }
+        QFrame#topNavigationControls { background:rgba(9, 21, 34, 150); border:2px solid #3f7fad; border-radius:8px; }
+        QPushButton#topNavigationButton { background:#1d5d99; color:white; border:2px solid #7fd0ff; border-radius:6px; font:700 18pt 'Yu Gothic UI', 'Segoe UI'; padding:0; }
+        QPushButton#topNavigationButton:pressed { background:#2f8fd4; }
         QLineEdit, QComboBox, QTableWidget { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:7px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }
         QSpinBox, QAbstractSpinBox { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:5px 30px 5px 6px; min-height:38px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }
         QSpinBox::up-button, QAbstractSpinBox::up-button {
@@ -5290,7 +5729,7 @@ class MainWindow(QMainWindow):
         self.summary_label.setText(f"パレット {len(placed_pallets)} / 明細 {sum(len(p.items) for p in placed_pallets)} / 総枚数 {sum(p.total_sheets for p in placed_pallets)} / 使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
         self.update_move_history_buttons()
         self.top_map.invalidate_base_cache()
-        self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_shipment_table(); self.refresh_memo_table(); self.refresh_detail()
+        self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_shipment_table(); self.refresh_memo_table(); self.refresh_history_table(); self.refresh_detail()
 
     def normalize_store_stacks(self) -> None:
         self.store.normalize_stacks()
@@ -5365,6 +5804,78 @@ class MainWindow(QMainWindow):
         if not self.store_dirty:
             return True
         return self.save_store_with_alerts(DATA_PATH)
+
+    def move_place_label(self, state: Optional[PalletMoveState]) -> str:
+        if state is None:
+            return ""
+        return f"{visible_location_code(state.location_code)}-{max(1, state.stack_order + 1)}"
+
+    def append_move_history_records(self, records: List[dict]) -> None:
+        if not records:
+            return
+        self.move_history_records.extend(records)
+        if save_move_history(self.move_history_records):
+            self.refresh_history_table()
+
+    def pallet_move_history_records(
+        self,
+        moved_pallets: List[PalletRecord],
+        before_states: Tuple[PalletMoveState, ...],
+        after_states: Tuple[PalletMoveState, ...],
+    ) -> List[dict]:
+        before_by_pallet = {state.pallet_number: state for state in before_states}
+        after_by_pallet = {state.pallet_number: state for state in after_states}
+        timestamp = history_now_text()
+        records: List[dict] = []
+        for moved_pallet in moved_pallets:
+            before_state = before_by_pallet.get(moved_pallet.pallet_number)
+            after_state = after_by_pallet.get(moved_pallet.pallet_number)
+            if before_state == after_state:
+                continue
+            items = moved_pallet.items or [InventoryItemLine(part_code="", size="", thickness_mm="", finish_text="", grade="", sheet_count=0, lot="", note="空パレット")]
+            for item in items:
+                records.append({
+                    "timestamp": timestamp,
+                    "action": "移動",
+                    "part_code": item.part_code,
+                    "size": item.size,
+                    "thickness": item.thickness_mm,
+                    "finish": item.finish_text,
+                    "grade": item.grade,
+                    "lot": normalize_lot(getattr(item, "lot", "")),
+                    "sheet_count": int(item.sheet_count),
+                    "from_location": self.move_place_label(before_state),
+                    "to_location": self.move_place_label(after_state),
+                    "from_pallet": moved_pallet.pallet_number,
+                    "to_pallet": moved_pallet.pallet_number,
+                    "note": item.note,
+                })
+        return records
+
+    def transfer_move_history_record(
+        self,
+        source: PalletRecord,
+        target: PalletRecord,
+        item: InventoryItemLine,
+        quantity: int,
+        note: str = "",
+    ) -> dict:
+        return {
+            "timestamp": history_now_text(),
+            "action": "積み替え",
+            "part_code": item.part_code,
+            "size": item.size,
+            "thickness": item.thickness_mm,
+            "finish": item.finish_text,
+            "grade": item.grade,
+            "lot": normalize_lot(getattr(item, "lot", "")),
+            "sheet_count": int(quantity),
+            "from_location": location_stack_label(source),
+            "to_location": location_stack_label(target),
+            "from_pallet": source.pallet_number,
+            "to_pallet": target.pallet_number,
+            "note": note or item.note,
+        }
 
     def closeEvent(self, event) -> None:
         if not self.persist_store_if_dirty():
@@ -5705,6 +6216,19 @@ class MainWindow(QMainWindow):
                 if col == 0:
                     item.setData(Qt.UserRole, row["note_id"])
                 self.memo_table.setItem(row_index, col, item)
+
+    def refresh_history_table(self) -> None:
+        if not hasattr(self, "history_table"):
+            return
+        records = list(reversed(self.move_history_records))
+        self.history_table.setRowCount(len(records))
+        for row_index, record in enumerate(records):
+            for col, (key, _label, _width) in enumerate(self.HISTORY_COLUMNS):
+                value = str(record.get(key, "") or "")
+                item = QTableWidgetItem(value)
+                item.setToolTip(value)
+                self.history_table.setItem(row_index, col, item)
+        self.history_table.resizeRowsToContents()
 
     def show_table_item_tooltip(self, table: QTableWidget, item: Optional[QTableWidgetItem]) -> None:
         if table is None or item is None:
@@ -6189,6 +6713,8 @@ class MainWindow(QMainWindow):
         self.top_map.update()
         self.iso_map.update()
         self.refresh_detail()
+        if hasattr(self, "tabs") and self.tabs.currentIndex() == 0:
+            self.top_map.setFocus(Qt.ShortcutFocusReason)
 
     def select_map_note(self, note_id: str) -> None:
         if self.current_note_id != note_id:
@@ -6524,6 +7050,9 @@ class MainWindow(QMainWindow):
             return
         action = self.move_undo_stack.pop()
         if self.apply_move_action(action, use_after=False):
+            if action.kind == "pallet":
+                moved = [pallet for state in action.pallet_before if (pallet := self.store.get_pallet(state.pallet_number)) is not None]
+                self.append_move_history_records(self.pallet_move_history_records(moved, action.pallet_after, action.pallet_before))
             self.move_redo_stack.append(action)
         self.update_move_history_buttons()
 
@@ -6532,6 +7061,9 @@ class MainWindow(QMainWindow):
             return
         action = self.move_redo_stack.pop()
         if self.apply_move_action(action, use_after=True):
+            if action.kind == "pallet":
+                moved = [pallet for state in action.pallet_after if (pallet := self.store.get_pallet(state.pallet_number)) is not None]
+                self.append_move_history_records(self.pallet_move_history_records(moved, action.pallet_before, action.pallet_after))
             self.move_undo_stack.append(action)
         self.update_move_history_buttons()
 
@@ -6658,6 +7190,7 @@ class MainWindow(QMainWindow):
             pallet_before=before,
             pallet_after=after,
         ))
+        self.append_move_history_records(self.pallet_move_history_records(members, before, after))
         self.select_pallet(pallet_number)
         self.mark_store_dirty()
         self.refresh_all()
@@ -6788,6 +7321,7 @@ class MainWindow(QMainWindow):
         source_item = next((item for item in source.items if item.line_id == line_id), None)
         if source_item is None:
             return
+        history_item = clone_item(source_item, quantity)
         target: Optional[PalletRecord] = None
         requested_target_number = ""
         if target_mode == "NEW":
@@ -6833,6 +7367,7 @@ class MainWindow(QMainWindow):
         source.updated_at = now_text()
         target.updated_at = now_text()
         self.store.normalize_stacks()
+        self.append_move_history_records([self.transfer_move_history_record(source, target, history_item, quantity)])
         self.mark_store_dirty()
         if target_mode == "NEW":
             self.select_pallet(target.pallet_number)
