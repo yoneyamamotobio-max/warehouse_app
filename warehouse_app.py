@@ -4434,6 +4434,7 @@ class MainWindow(QMainWindow):
         self.top_navigation_press_pos = QPoint()
         self.top_navigation_drag_active = False
         self.top_navigation_pressed_button: Optional[QPushButton] = None
+        self.top_navigation_cursor_location: Optional[str] = None
         hidden_columns = str(self.settings.value("inventory_hidden_columns", "") or "")
         self.inventory_hidden_columns: set[int] = {
             int(value) for value in hidden_columns.split(",") if value.isdigit()
@@ -4997,7 +4998,7 @@ class MainWindow(QMainWindow):
             target_col += dx
             target_row += dy
             if target_col < 0 or target_col >= GRID_COLUMNS or target_row < 0 or target_row >= GRID_ROWS:
-                QToolTip.showText(self.top_navigation_controls.mapToGlobal(self.top_navigation_controls.rect().center()), "その方向にパレットがありません。", self.top_navigation_controls)
+                self.top_map.setFocus(Qt.ShortcutFocusReason)
                 return
             target_location = format_location_code(target_col, target_row)
             candidates = self.store.pallets_at_location(target_location)
@@ -6627,6 +6628,8 @@ class MainWindow(QMainWindow):
         primary = self.current_pallet_number if self.current_pallet_number in valid_numbers else valid_numbers[0]
         self.current_pallet_number = None
         self.current_note_id = None
+        primary_pallet = self.store.get_pallet(primary)
+        self.top_navigation_cursor_location = current_visible_location_for_pallet(primary_pallet) if primary_pallet is not None else None
         self.top_map.selected_pallet = primary
         self.top_map.selected_pallets = set(valid_numbers)
         self.top_map.selected_note = None
@@ -6704,6 +6707,8 @@ class MainWindow(QMainWindow):
             self.detail_frame_manual_position = None
         self.current_pallet_number = pallet_number
         self.current_note_id = None
+        pallet = self.store.get_pallet(pallet_number)
+        self.top_navigation_cursor_location = current_visible_location_for_pallet(pallet) if pallet is not None else None
         self.top_map.selected_pallet = pallet_number
         self.top_map.selected_pallets = {pallet_number}
         self.top_map.selected_note = None
@@ -6723,6 +6728,7 @@ class MainWindow(QMainWindow):
             return
         self.current_note_id = note_id
         self.current_pallet_number = None
+        self.top_navigation_cursor_location = None
         self.top_map.selected_note = note_id
         self.top_map.selected_pallet = None
         self.top_map.selected_pallets = set()
@@ -7429,14 +7435,14 @@ class MainWindow(QMainWindow):
             log_store_error(f"import failed: {import_path}\n{traceback.format_exc()}")
             QMessageBox.warning(self, "Import", f"読み込みに失敗しました。現在のデータは変更していません。\n{file_path}")
             return
-        self.store = imported_store; self.top_map.store = self.store; self.iso_map.store = self.store; self.current_pallet_number = None; self.current_note_id = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.move_undo_stack.clear(); self.move_redo_stack.clear(); self.mark_store_dirty(immediate=True); self.refresh_all(); QMessageBox.information(self, "Import", f"読み込みました。\n{file_path}")
+        self.store = imported_store; self.top_map.store = self.store; self.iso_map.store = self.store; self.current_pallet_number = None; self.current_note_id = None; self.top_navigation_cursor_location = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.move_undo_stack.clear(); self.move_redo_stack.clear(); self.mark_store_dirty(immediate=True); self.refresh_all(); QMessageBox.information(self, "Import", f"読み込みました。\n{file_path}")
 
     def clear_selection(self) -> None:
         self.disable_table_multi_select()
         for table in (getattr(self, "inventory_table", None), getattr(self, "shipment_table", None)):
             if table is not None:
                 table.clearSelection()
-        self.current_pallet_number = None; self.current_note_id = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.top_map.hover_note = None; self.top_map.hover_target = None; self.iso_map.selected_pallet = None; self.apply_responsive_layout(); self.top_map.invalidate_base_cache(); self.top_map.update(); self.iso_map.update(); self.refresh_detail()
+        self.current_pallet_number = None; self.current_note_id = None; self.top_navigation_cursor_location = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.top_map.hover_note = None; self.top_map.hover_target = None; self.iso_map.selected_pallet = None; self.apply_responsive_layout(); self.top_map.invalidate_base_cache(); self.top_map.update(); self.iso_map.update(); self.refresh_detail()
 
     def current_zoom_widget(self) -> Optional[QWidget]:
         current = self.tabs.currentWidget()
