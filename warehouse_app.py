@@ -4434,6 +4434,8 @@ class MainWindow(QMainWindow):
         self.top_navigation_press_pos = QPoint()
         self.top_navigation_drag_active = False
         self.top_navigation_pressed_button: Optional[QPushButton] = None
+        self.top_navigation_last_action_ms = 0.0
+        self.top_navigation_ignore_mouse_until_ms = 0.0
         self.top_navigation_cursor_location: Optional[str] = None
         hidden_columns = str(self.settings.value("inventory_hidden_columns", "") or "")
         self.inventory_hidden_columns: set[int] = {
@@ -4891,12 +4893,26 @@ class MainWindow(QMainWindow):
                 return button
         return None
 
+    def top_navigation_now_ms(self) -> float:
+        return datetime.now().timestamp() * 1000.0
+
+    def trigger_top_navigation_move(self, button: QPushButton) -> None:
+        now_ms = self.top_navigation_now_ms()
+        if now_ms - self.top_navigation_last_action_ms < 220:
+            return
+        self.top_navigation_last_action_ms = now_ms
+        dx = int(button.property("nav_dx") or 0)
+        dy = int(button.property("nav_dy") or 0)
+        self.navigate_selected_pallet(dx, dy)
+
     def handle_top_navigation_event(self, source, event) -> bool:
         controls = getattr(self, "top_navigation_controls", None)
         buttons = set(getattr(self, "top_navigation_buttons", []))
         if controls is None or source not in buttons | {controls}:
             return False
         if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            if self.top_navigation_now_ms() < self.top_navigation_ignore_mouse_until_ms:
+                return True
             self.top_navigation_press_global = event.globalPosition().toPoint()
             self.top_navigation_press_pos = controls.pos()
             self.top_navigation_drag_active = False
@@ -4943,6 +4959,12 @@ class MainWindow(QMainWindow):
                 controls.raise_()
             return True
         if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            if self.top_navigation_now_ms() < self.top_navigation_ignore_mouse_until_ms:
+                self.top_navigation_drag_active = False
+                if self.top_navigation_pressed_button is not None:
+                    self.top_navigation_pressed_button.setDown(False)
+                self.top_navigation_pressed_button = None
+                return True
             current_global = event.globalPosition().toPoint()
             pressed = self.top_navigation_pressed_button
             if pressed is not None:
@@ -4951,13 +4973,12 @@ class MainWindow(QMainWindow):
                 self.top_navigation_manual_pos = QPoint(controls.pos())
                 self.save_top_navigation_position()
             elif pressed is not None and self.top_navigation_button_at_global(current_global) is pressed:
-                dx = int(pressed.property("nav_dx") or 0)
-                dy = int(pressed.property("nav_dy") or 0)
-                self.navigate_selected_pallet(dx, dy)
+                self.trigger_top_navigation_move(pressed)
             self.top_navigation_drag_active = False
             self.top_navigation_pressed_button = None
             return True
         if event.type() == QEvent.TouchEnd:
+            self.top_navigation_ignore_mouse_until_ms = self.top_navigation_now_ms() + 700
             points = event.points()
             current_global = points[0].globalPosition().toPoint() if points else self.top_navigation_press_global
             pressed = self.top_navigation_pressed_button
@@ -4967,9 +4988,7 @@ class MainWindow(QMainWindow):
                 self.top_navigation_manual_pos = QPoint(controls.pos())
                 self.save_top_navigation_position()
             elif pressed is not None and self.top_navigation_button_at_global(current_global) is pressed:
-                dx = int(pressed.property("nav_dx") or 0)
-                dy = int(pressed.property("nav_dy") or 0)
-                self.navigate_selected_pallet(dx, dy)
+                self.trigger_top_navigation_move(pressed)
             self.top_navigation_drag_active = False
             self.top_navigation_pressed_button = None
             return True
@@ -4981,6 +5000,14 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+    def navigation_location_for_pallet(self, pallet: PalletRecord) -> Optional[str]:
+        if self.store.is_entry_waiting_pallet(pallet):
+            return None
+        location_code = normalize_location_code(pallet.location_code)
+        if not location_code or location_code == ENTRY_LOCATION:
+            return None
+        return visible_location_code(location_code)
+
     def navigate_selected_pallet(self, dx: int, dy: int) -> None:
         pallet = self.store.get_pallet(self.current_pallet_number or "")
         if pallet is None:
@@ -4988,27 +5015,35 @@ class MainWindow(QMainWindow):
             return
         if (dx == 0 and dy == 0) or (dx != 0 and dy != 0):
             return
-        current_location = current_visible_location_for_pallet(pallet)
+        current_location = self.navigation_location_for_pallet(pallet)
         if not current_location:
             return
         col, row = location_to_grid(current_location)
-        target_col = col
-        target_row = row
-        while True:
-            target_col += dx
-            target_row += dy
-            if target_col < 0 or target_col >= GRID_COLUMNS or target_row < 0 or target_row >= GRID_ROWS:
-                self.top_map.setFocus(Qt.ShortcutFocusReason)
-                return
-            target_location = format_location_code(target_col, target_row)
-            candidates = self.store.pallets_at_location(target_location)
-            if not candidates:
+        candidates: List[Tuple[int, int, int, str, PalletRecord]] = []
+        for candidate in self.store.pallets:
+            if candidate.pallet_number == pallet.pallet_number:
                 continue
-            candidates.sort(key=lambda item: (abs(item.stack_order - pallet.stack_order), item.stack_order, item.pallet_number))
-            self.select_pallet(candidates[0].pallet_number)
+            candidate_location = self.navigation_location_for_pallet(candidate)
+            if not candidate_location:
+                continue
+            candidate_col, candidate_row = location_to_grid(candidate_location)
+            distance = 0
+            if dy < 0 and candidate_col == col and candidate_row < row:
+                distance = row - candidate_row
+            elif dy > 0 and candidate_col == col and candidate_row > row:
+                distance = candidate_row - row
+            elif dx < 0 and candidate_row == row and candidate_col < col:
+                distance = col - candidate_col
+            elif dx > 0 and candidate_row == row and candidate_col > col:
+                distance = candidate_col - col
+            else:
+                continue
+            candidates.append((distance, abs(candidate.stack_order - pallet.stack_order), candidate.stack_order, candidate.pallet_number, candidate))
+        if candidates:
+            candidates.sort()
+            self.select_pallet(candidates[0][4].pallet_number)
             self.tabs.setCurrentIndex(0)
-            self.top_map.setFocus(Qt.ShortcutFocusReason)
-            return
+        self.top_map.setFocus(Qt.ShortcutFocusReason)
 
     def active_map_widget(self) -> Optional[QWidget]:
         if not hasattr(self, "tabs"):
