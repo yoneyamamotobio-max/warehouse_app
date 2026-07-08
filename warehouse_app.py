@@ -2977,7 +2977,7 @@ class TopMapWidget(QWidget):
         self.hover_note = None
         self.hover_target = None
         self.selected_pallets: set[str] = set()
-        self.location_rects: Dict[str, QRect] = {}; self.pallet_rects: Dict[str, QRect] = {}; self.note_rects: Dict[str, QRect] = {}
+        self.location_rects: Dict[str, QRect] = {}; self.pallet_rects: Dict[str, QRect] = {}; self.note_rects: Dict[str, QRect] = {}; self.note_button_rects: Dict[str, QRect] = {}
         self.dragging_pallet = None; self.drag_offset = QPoint(); self.drag_point = QPoint(); self.zoom = 1.0
         self.dragging_note = None
         self.is_dragging = False
@@ -3231,6 +3231,43 @@ class TopMapWidget(QWidget):
         location = self.note_visible_location(note)
         return bool(location and self.store.pallets_at_location(location))
 
+    def note_button_rect(self, rect: QRect) -> QRect:
+        size = max(18, min(24, min(rect.width(), rect.height()) - 6))
+        return QRect(rect.left() + 2, rect.top() + 2, size, size)
+
+    def note_button_reference_rect(self, note: MapNoteRecord, fallback_rect: QRect) -> QRect:
+        location = self.note_visible_location(note)
+        cell_rect = self.location_rects.get(normalize_location_code(location)) if location else None
+        if cell_rect is None:
+            return fallback_rect
+        scale = self.draw_scale(self.scaled_bounds())
+        width_mm, depth_mm = footprint_mm_for_size("OL", 0)
+        width = max(18, int(width_mm * scale))
+        height = max(14, int(depth_mm * scale))
+        center = cell_rect.center()
+        return QRect(center.x() - width // 2, center.y() - height // 2, width, height)
+
+    def note_button_rect_for_note(self, note: MapNoteRecord, rect: QRect) -> QRect:
+        return self.note_button_rect(self.note_button_reference_rect(note, rect))
+
+    def note_hit_requires_button(self, note_id: str) -> bool:
+        note = self.store.get_map_note(note_id)
+        return bool(note is not None and self.note_over_pallet(note))
+
+    def note_button_hit_at(self, point: QPoint) -> Optional[str]:
+        for note_id, rect in reversed(list(self.note_button_rects.items())):
+            if rect.contains(point):
+                return note_id
+        return None
+
+    def note_body_hit_at(self, point: QPoint, include_pass_through: bool = False) -> Optional[str]:
+        for note_id, rect in reversed(list(self.note_rects.items())):
+            if not rect.contains(point):
+                continue
+            if include_pass_through or not self.note_hit_requires_button(note_id):
+                return note_id
+        return None
+
     def nearest_location(self, point: QPoint) -> Optional[str]:
         if not self.location_rects:
             return None
@@ -3286,16 +3323,16 @@ class TopMapWidget(QWidget):
         hatch.setAlpha(170)
         outline = QColor("#fff8c9" if active else base_color.lighter(115))
         if pass_through and not selected:
-            marker = QRect(rect.left() + 4, rect.top() + 4, min(46, max(34, rect.width() - 8)), 18)
-            painter.setBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), 72))
-            painter.setPen(QPen(outline, 3))
+            marker = self.note_button_rect_for_note(note, rect)
+            painter.setBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), 42))
+            painter.setPen(QPen(outline, 2))
             painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 4, 4)
             painter.setBrush(QColor(7, 17, 31, 220))
             painter.setPen(QPen(outline, 2))
-            painter.drawRoundedRect(marker, 5, 5)
+            painter.drawEllipse(marker)
             painter.setPen(QColor("#fff8c9"))
-            painter.setFont(QFont("Yu Gothic UI", 7, QFont.Bold))
-            painter.drawText(marker, Qt.AlignCenter, "メモ")
+            painter.setFont(QFont("Yu Gothic UI", 9, QFont.Bold))
+            painter.drawText(marker, Qt.AlignCenter, "M")
             painter.restore()
             return
         if selected and self.attention_visible:
@@ -3424,7 +3461,7 @@ class TopMapWidget(QWidget):
             self.attention_visible = False
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), QColor("#07111f"))
-        self.location_rects.clear(); self.pallet_rects.clear(); self.note_rects.clear(); bounds = self.scaled_bounds(); columns, rows = self.draw_grid(painter, bounds)
+        self.location_rects.clear(); self.pallet_rects.clear(); self.note_rects.clear(); self.note_button_rects.clear(); bounds = self.scaled_bounds(); columns, rows = self.draw_grid(painter, bounds)
         self.draw_entry_waiting_area(painter, bounds)
         entrance_rect = QRect(bounds.center().x() - 80, bounds.bottom() - 28, 160, 18)
         painter.setPen(QPen(QColor("#4fc3ff"), 2))
@@ -3490,6 +3527,7 @@ class TopMapWidget(QWidget):
             if self.dragging_note == note.note_id:
                 rect.moveTo(self.drag_point - self.drag_offset)
             self.note_rects[note.note_id] = rect
+            self.note_button_rects[note.note_id] = self.note_button_rect_for_note(note, rect)
             if note.note_id != exclude_note:
                 self.draw_note(painter, note, rect, pass_through=self.note_over_pallet(note))
         if saved_state is not None:
@@ -3698,6 +3736,22 @@ class TopMapWidget(QWidget):
                 return
 
     def begin_drag_at(self, point: QPoint) -> bool:
+        note_button_hit = self.note_button_hit_at(point)
+        if note_button_hit:
+            rect = self.note_rects.get(note_button_hit)
+            if rect is not None:
+                self.selected_note = note_button_hit
+                self.selected_pallet = None
+                self.selected_pallets = set()
+                self.start_pending_drag("note", note_button_hit, rect, point)
+                return True
+        if self.selected_note:
+            selected_note_rect = self.note_rects.get(self.selected_note)
+            if selected_note_rect is not None and selected_note_rect.contains(point):
+                self.selected_pallet = None
+                self.selected_pallets = set()
+                self.start_pending_drag("note", self.selected_note, selected_note_rect, point)
+                return True
         for pallet_number, rect in self.pallet_rects.items():
             if rect.contains(point):
                 self.selected_pallet = pallet_number
@@ -3705,12 +3759,14 @@ class TopMapWidget(QWidget):
                 self.selected_note = None
                 self.start_pending_drag("pallet", pallet_number, rect, point)
                 return True
-        for note_id, rect in self.note_rects.items():
-            if rect.contains(point):
-                self.selected_note = note_id
+        note_body_hit = self.note_body_hit_at(point)
+        if note_body_hit:
+            rect = self.note_rects.get(note_body_hit)
+            if rect is not None:
+                self.selected_note = note_body_hit
                 self.selected_pallet = None
                 self.selected_pallets = set()
-                self.start_pending_drag("note", note_id, rect, point)
+                self.start_pending_drag("note", note_body_hit, rect, point)
                 return True
         return False
 
@@ -3818,16 +3874,15 @@ class TopMapWidget(QWidget):
             self.request_drag_update(old_drag_rect, self.current_drag_update_rect())
             return
         hit = None
-        note_hit = None
+        note_hit = self.note_button_hit_at(point)
         for pallet_number, rect in reversed(list(self.pallet_rects.items())):
             if rect.contains(point):
                 hit = pallet_number
                 break
-        if hit is None:
-            for note_id, rect in reversed(list(self.note_rects.items())):
-                if rect.contains(point):
-                    note_hit = note_id
-                    break
+        if note_hit is not None:
+            hit = None
+        if note_hit is None and hit is None:
+            note_hit = self.note_body_hit_at(point)
         new_hover_target = ("note", note_hit) if note_hit else (("pallet", hit) if hit else None)
         if new_hover_target == self.hover_target:
             return
