@@ -6512,8 +6512,11 @@ class MainWindow(QMainWindow):
     def copy_shipment_table(self) -> None:
         self.copy_table_to_clipboard(self.shipment_table)
 
+    def inventory_summary_identifier(self, item: InventoryItemLine) -> str:
+        return f"#{item.part_code}-{item.size}{item.thickness_mm} {item.finish_text}"
+
     def copy_inventory_summary(self) -> None:
-        rows: Dict[Tuple[str, str, str, str, str, str], dict] = {}
+        rows: Dict[Tuple[str, str, str, str, str], dict] = {}
         for pallet in self.filtered_pallets():
             for item in pallet.items:
                 if not self.item_matches_keyword(item):
@@ -6521,20 +6524,16 @@ class MainWindow(QMainWindow):
                     pallet_haystacks = [pallet.pallet_number.lower(), pallet.location_code.lower(), pallet.received_date.lower(), color_label(pallet.color_key).lower(), pallet_color_text(pallet).lower()]
                     if pallet_tokens and not all(any(token in hay for hay in pallet_haystacks) for token in pallet_tokens):
                         continue
-                key = (item.part_code, item.size, str(item.thickness_mm), item.finish_text, item.grade, item.lot)
-                identifier = f"#{item.part_code}-{item.size}{item.thickness_mm} {item.finish_text}"
-                if item.lot:
-                    identifier += f" Lot:{item.lot}"
+                key = (item.part_code, item.size, str(item.thickness_mm), item.finish_text, item.grade)
                 row = rows.setdefault(
                     key,
                     {
-                        "identifier": identifier,
+                        "identifier": self.inventory_summary_identifier(item),
                         "part_code": item.part_code,
                         "size": item.size,
                         "thickness": str(item.thickness_mm),
                         "finish": item.finish_text,
                         "grade": item.grade,
-                        "lot": item.lot,
                         "sheets": 0,
                     },
                 )
@@ -6545,7 +6544,7 @@ class MainWindow(QMainWindow):
             return
         ordered = sorted(
             rows.values(),
-            key=lambda row: (row["part_code"], row["size"], parse_thickness_value(row["thickness"]), row["finish"], row["grade"], row["lot"]),
+            key=lambda row: (row["part_code"], row["size"], parse_thickness_value(row["thickness"]), row["finish"], row["grade"]),
         )
         lines = ["\t".join(["品名", "合計枚数"])]
         for row in ordered:
