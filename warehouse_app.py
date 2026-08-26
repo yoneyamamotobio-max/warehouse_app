@@ -27,6 +27,7 @@ DATA_PATH = APP_DIR / "inventory-data.json"
 MOVE_HISTORY_PATH = APP_DIR / "move_history.json"
 ICON_PATH = APP_DIR / "icon.ico"
 STORE_LOG_PATH = APP_DIR / "store-error.log"
+SAVE_HISTORY_LOG_PATH = APP_DIR / "save_history.log"
 APP_ID = "Yone.WarehouseApp"
 DAILY_BACKUP_RETENTION_DAYS = 90
 GRID_COLUMNS = 12
@@ -618,6 +619,17 @@ def log_store_error(message: str) -> None:
     try:
         with STORE_LOG_PATH.open("a", encoding="utf-8") as handle:
             handle.write(f"[{now_text()}] {message}\n")
+    except Exception:
+        pass
+
+
+def log_save_history(status: str, operation: str = "change", error: Optional[Exception] = None) -> None:
+    try:
+        detail = f"{datetime.now():%Y/%m/%d %H:%M:%S} SAVE {status} {operation or 'change'}"
+        if error is not None:
+            detail += f" {error.__class__.__name__}: {error}"
+        with SAVE_HISTORY_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(detail + "\n")
     except Exception:
         pass
 
@@ -4471,7 +4483,7 @@ class MainWindow(QMainWindow):
     ]
 
     def __init__(self) -> None:
-        super().__init__(); data_file_existed_at_startup = DATA_PATH.exists(); self.store = load_store(); create_startup_daily_backup(DATA_PATH, data_file_existed_at_startup); self.current_pallet_number = None; self.current_note_id = None
+        super().__init__(); self.inventory_data_path = DATA_PATH.resolve(); data_file_existed_at_startup = self.inventory_data_path.exists(); self.store = load_store(self.inventory_data_path); create_startup_daily_backup(self.inventory_data_path, data_file_existed_at_startup); self.current_pallet_number = None; self.current_note_id = None
         self.move_history_records: List[dict] = load_move_history()
         self.last_registration_item_cache: Optional[InventoryItemLine] = None
         self.move_undo_stack: List[MoveAction] = []
@@ -4534,6 +4546,7 @@ class MainWindow(QMainWindow):
         self.table_press_moved = False
         self.table_multi_select_mode: set[QTableWidget] = set()
         self.store_dirty = False
+        self.save_status_state = "読込済み"
         self.setWindowTitle("Warehouse Management App - PySide6"); self.resize(1480, 920); self.setMinimumSize(900, 620)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
@@ -4544,6 +4557,10 @@ class MainWindow(QMainWindow):
         central = QWidget(); self.setCentralWidget(central); root = QVBoxLayout(central); root.setContentsMargins(14, 14, 14, 14); root.setSpacing(10)
         self.title_label = QLabel("大阪工場倉庫"); self.title_label.setStyleSheet("font:700 18px 'Yu Gothic UI', 'Segoe UI'; color:#7fd0ff;")
         self.summary_label = QLabel(); self.summary_label.setStyleSheet("color:#89a4c2;"); self.summary_label.setWordWrap(True)
+        self.save_status_label = QLabel()
+        self.save_status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.save_status_label.setMinimumWidth(360)
+        self.save_status_label.setStyleSheet("color:#9fd2ff; font:700 10.5pt 'Yu Gothic UI', 'Segoe UI';")
         self.new_button = QPushButton("新規登録"); self.new_button.clicked.connect(self.open_registration)
         self.add_note_button = QPushButton("メモ追加"); self.add_note_button.clicked.connect(self.open_map_note_dialog)
         self.blocked_mode_button = QPushButton("置けないマス"); self.blocked_mode_button.setCheckable(True); self.blocked_mode_button.toggled.connect(self.set_blocked_edit_mode)
@@ -4582,7 +4599,7 @@ class MainWindow(QMainWindow):
         self.copy_inventory_button.setMinimumHeight(40)
         self.copy_shipment_button.setMinimumHeight(40)
         self.inventory_columns_button.setMinimumHeight(40)
-        title_row = QHBoxLayout(); title_row.addWidget(self.title_label); title_row.addWidget(self.summary_label, 1)
+        title_row = QHBoxLayout(); title_row.addWidget(self.title_label); title_row.addWidget(self.summary_label, 1); title_row.addWidget(self.save_status_label, 0, Qt.AlignRight)
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
         for widget in [self.new_button, self.add_note_button, self.blocked_mode_button]:
@@ -5696,7 +5713,7 @@ class MainWindow(QMainWindow):
             return
         if not changed:
             return
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="blocked_location")
         self.refresh_all()
 
     def open_inventory_column_menu(self) -> None:
@@ -5818,6 +5835,7 @@ class MainWindow(QMainWindow):
         placed_pallets = self.placed_pallets()
         capacity = self.capacity_percent()
         self.summary_label.setText(f"パレット {len(placed_pallets)} / 明細 {sum(len(p.items) for p in placed_pallets)} / 総枚数 {sum(p.total_sheets for p in placed_pallets)} / 使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
+        self.update_save_status_display()
         self.update_move_history_buttons()
         self.top_map.invalidate_base_cache()
         self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_shipment_table(); self.refresh_memo_table(); self.refresh_history_table(); self.refresh_detail()
@@ -5825,9 +5843,35 @@ class MainWindow(QMainWindow):
     def normalize_store_stacks(self) -> None:
         self.store.normalize_stacks()
 
-    def mark_store_dirty(self, immediate: bool = False) -> None:
+    def save_status_timestamp_text(self) -> str:
+        path = getattr(self, "inventory_data_path", DATA_PATH)
+        try:
+            saved_at = datetime.fromtimestamp(path.stat().st_mtime)
+        except Exception:
+            return "-"
+        return saved_at.strftime("%Y/%m/%d %H:%M:%S")
+
+    def update_save_status_display(self, state: Optional[str] = None) -> None:
+        label = getattr(self, "save_status_label", None)
+        if label is None:
+            return
+        if state is None:
+            state = getattr(self, "save_status_state", "未保存" if getattr(self, "store_dirty", False) else "読込済み")
+        self.save_status_state = state
+        warning = state in {"未保存", "保存失敗"}
+        path = getattr(self, "inventory_data_path", DATA_PATH)
+        text = f"{path.name} / 最終保存 {self.save_status_timestamp_text()} / {'⚠ ' if warning else ''}{state}"
+        label.setText(text)
+        label.setToolTip(str(path))
+        label.setStyleSheet(
+            "color:#ffce73; font:700 10.5pt 'Yu Gothic UI', 'Segoe UI';" if warning
+            else "color:#9fd2ff; font:700 10.5pt 'Yu Gothic UI', 'Segoe UI';"
+        )
+
+    def mark_store_dirty(self, immediate: bool = False, operation: str = "change") -> None:
         self.store_dirty = True
-        self.persist_store_if_dirty()
+        self.update_save_status_display("未保存")
+        self.persist_store_if_dirty(operation)
 
     def prepare_store_for_save(self) -> None:
         self.store.ensure_defaults()
@@ -5840,7 +5884,7 @@ class MainWindow(QMainWindow):
             for item in shipment.items:
                 item.lot = normalize_lot(getattr(item, "lot", ""))
 
-    def save_store_with_alerts(self, path: Path = DATA_PATH) -> bool:
+    def save_store_with_alerts(self, path: Path = DATA_PATH, operation: str = "change") -> bool:
         self.prepare_store_for_save()
         target_path = path
         last_error: Optional[Exception] = None
@@ -5848,11 +5892,17 @@ class MainWindow(QMainWindow):
             try:
                 save_store(self.store, target_path)
                 self.store_dirty = False
+                log_save_history("OK", operation)
+                if target_path.resolve() == getattr(self, "inventory_data_path", DATA_PATH).resolve():
+                    self.update_save_status_display("保存済み")
                 if target_path != DATA_PATH:
                     QMessageBox.information(self, "保存", f"保存しました。\n{target_path}")
                 return True
             except Exception as error:
                 last_error = error
+                self.store_dirty = True
+                self.update_save_status_display("保存失敗")
+                log_save_history("ERROR", operation, error)
                 log_store_error(f"save failed: {target_path}\n{traceback.format_exc()}")
 
             action = self.show_save_failure_dialog(target_path, last_error)
@@ -5871,11 +5921,12 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Critical)
         box.setWindowTitle("保存失敗")
-        box.setText("データの保存に失敗しました。")
-        detail = f"保存先:\n{path}"
+        box.setText("在庫データの保存に失敗しました。")
+        detail = "現在の変更内容が保存されていない可能性があります。\nアプリを終了せず、管理者へ連絡してください。"
+        detail += f"\n\n保存先:\n{path}"
         if error is not None:
             detail += f"\n\n原因:\n{error}"
-        detail += "\n\n未保存の変更があります。再試行するか、別名保存してください。"
+        detail += "\n\n再試行するか、別名保存してください。"
         box.setInformativeText(detail)
         retry_button = box.addButton("再試行", QMessageBox.AcceptRole)
         save_as_button = box.addButton("別名保存", QMessageBox.ActionRole)
@@ -5891,10 +5942,10 @@ class MainWindow(QMainWindow):
             return "close"
         return "close"
 
-    def persist_store_if_dirty(self) -> bool:
+    def persist_store_if_dirty(self, operation: str = "change") -> bool:
         if not self.store_dirty:
             return True
-        return self.save_store_with_alerts(DATA_PATH)
+        return self.save_store_with_alerts(DATA_PATH, operation)
 
     def move_place_label(self, state: Optional[PalletMoveState]) -> str:
         if state is None:
@@ -5969,7 +6020,7 @@ class MainWindow(QMainWindow):
         }
 
     def closeEvent(self, event) -> None:
-        if not self.persist_store_if_dirty():
+        if not self.persist_store_if_dirty("app_close"):
             event.ignore()
             return
         super().closeEvent(event)
@@ -6594,7 +6645,7 @@ class MainWindow(QMainWindow):
             if shipment_id:
                 target_ids.append(str(shipment_id))
         self.store.shipments = [shipment for shipment in self.store.shipments if shipment.shipment_id not in target_ids]
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="shipment_delete")
         self.refresh_all()
 
     def restore_selected_shipments(self) -> None:
@@ -6659,7 +6710,7 @@ class MainWindow(QMainWindow):
         self.store.normalize_stacks()
         if restored_numbers:
             self.select_pallet(restored_numbers[0])
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="shipment_restore")
         self.refresh_all()
         if renamed_pairs:
             note = "\n".join([f"{before} -> {after}" for before, after in renamed_pairs[:6]])
@@ -6788,7 +6839,7 @@ class MainWindow(QMainWindow):
             self.select_pallet(next_pallet_number)
         else:
             self.clear_selection()
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="shipment_add")
         self.refresh_all()
 
     def select_pallet(self, pallet_number: str) -> None:
@@ -7069,7 +7120,7 @@ class MainWindow(QMainWindow):
         notes = dict(DEFAULT_EDITABLE_COLOR_LABEL_NOTES)
         notes.update({key: value for key, value in dialog.payload().items() if key in EDITABLE_COLOR_LABEL_KEYS})
         self.store.color_label_notes = notes
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="color_label_notes")
         self.refresh_all()
 
     def pallet_move_states(self, pallet_numbers) -> Tuple[PalletMoveState, ...]:
@@ -7136,7 +7187,7 @@ class MainWindow(QMainWindow):
             self.select_map_note(note.note_id)
         else:
             return False
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="move_redo" if use_after else "move_undo")
         self.refresh_all()
         return True
 
@@ -7179,7 +7230,7 @@ class MainWindow(QMainWindow):
             return
         self.store.map_notes.append(note)
         self.select_map_note(note.note_id)
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="memo_add")
         self.refresh_all()
 
     def move_map_note(self, note_id: str, map_x: float, map_y: float) -> None:
@@ -7198,7 +7249,7 @@ class MainWindow(QMainWindow):
             note_before=before,
             note_after=after,
         ))
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="memo_move")
         self.refresh_all()
 
     def open_map_note_editor(self, note_id: str) -> None:
@@ -7217,7 +7268,7 @@ class MainWindow(QMainWindow):
         note.color_key = color_key
         note.updated_at = now_text()
         self.select_map_note(note.note_id)
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="memo_edit")
         self.refresh_all()
 
     def open_map_note_context_menu(self, note_id: str, global_pos: QPoint) -> None:
@@ -7244,7 +7295,7 @@ class MainWindow(QMainWindow):
             self.current_note_id = None
             self.top_map.selected_note = None
             self.apply_responsive_layout()
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="memo_delete")
         self.refresh_all()
 
     def move_pallet(self, pallet_number: str, map_x: float, map_y: float, destination: str) -> None:
@@ -7287,7 +7338,7 @@ class MainWindow(QMainWindow):
         ))
         self.append_move_history_records(self.pallet_move_history_records(members, before, after))
         self.select_pallet(pallet_number)
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="pallet_move")
         self.refresh_all()
 
     def rotate_selected_pallet(self) -> None:
@@ -7300,7 +7351,7 @@ class MainWindow(QMainWindow):
             pallet.map_x, pallet.map_y = self.top_map.normalized_position_for_location(pallet.location_code, pallet)
         elif pallet.map_x is not None and pallet.map_y is not None:
             pallet.map_x, pallet.map_y = self.top_map.clamped_normalized_for_pallet(pallet, pallet.map_x, pallet.map_y)
-        pallet.updated_at = now_text(); self.mark_store_dirty(); self.refresh_all()
+        pallet.updated_at = now_text(); self.mark_store_dirty(operation="pallet_rotate"); self.refresh_all()
 
     def adjust_selected_stack(self, delta: int) -> None:
         pallet = self.store.get_pallet(self.current_pallet_number or "")
@@ -7318,7 +7369,7 @@ class MainWindow(QMainWindow):
         pallet.stack_order, other.stack_order = other.stack_order, pallet.stack_order
         pallet.updated_at = now_text()
         self.normalize_store_stacks()
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="stack_order")
         self.refresh_all()
 
     def unstack_selected_pallet(self) -> None:
@@ -7349,7 +7400,7 @@ class MainWindow(QMainWindow):
         pallet.updated_at = now_text()
         self.current_pallet_number = pallet.pallet_number
         self.normalize_store_stacks()
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="pallet_unstack")
         self.refresh_all()
         QMessageBox.information(self, "列を解除", "解除したパレットは仮置きエリア（未配置）へ移動しました。")
 
@@ -7392,7 +7443,7 @@ class MainWindow(QMainWindow):
         pallet.updated_at = now_text()
         self.current_pallet_number = pallet_number
         self.normalize_store_stacks()
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="inventory_edit")
         self.refresh_all()
         if pallet_number != requested_number:
             QMessageBox.information(self, "編集", f"同名ありのため、`{pallet_number}` で登録しました。")
@@ -7463,7 +7514,7 @@ class MainWindow(QMainWindow):
         target.updated_at = now_text()
         self.store.normalize_stacks()
         self.append_move_history_records([self.transfer_move_history_record(source, target, history_item, quantity)])
-        self.mark_store_dirty()
+        self.mark_store_dirty(operation="inventory_transfer")
         if target_mode == "NEW":
             self.select_pallet(target.pallet_number)
         self.refresh_all()
@@ -7495,7 +7546,7 @@ class MainWindow(QMainWindow):
             cached_item.note = ""
             self.last_registration_item_cache = cached_item
         self.normalize_store_stacks()
-        self.select_pallet(pallet_number); self.mark_store_dirty(); self.refresh_all()
+        self.select_pallet(pallet_number); self.mark_store_dirty(operation="inventory_add"); self.refresh_all()
         if pallet_number != requested_number:
             QMessageBox.information(self, "新規登録", f"同名ありのため、`{pallet_number}` で登録しました。")
 
@@ -7503,7 +7554,7 @@ class MainWindow(QMainWindow):
         default_name = APP_DIR / f"inventory-export-{datetime.now():%Y%m%d-%H%M%S}.json"
         file_path, _ = QFileDialog.getSaveFileName(self, "Export", str(default_name), "JSON Files (*.json)")
         if file_path:
-            self.save_store_with_alerts(Path(file_path))
+            self.save_store_with_alerts(Path(file_path), operation="export")
 
     def import_data(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "Import", str(APP_DIR), "JSON Files (*.json)")
@@ -7524,7 +7575,7 @@ class MainWindow(QMainWindow):
             log_store_error(f"import failed: {import_path}\n{traceback.format_exc()}")
             QMessageBox.warning(self, "Import", f"読み込みに失敗しました。現在のデータは変更していません。\n{file_path}")
             return
-        self.store = imported_store; self.top_map.store = self.store; self.iso_map.store = self.store; self.current_pallet_number = None; self.current_note_id = None; self.top_navigation_cursor_location = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.move_undo_stack.clear(); self.move_redo_stack.clear(); self.mark_store_dirty(immediate=True); self.refresh_all(); QMessageBox.information(self, "Import", f"読み込みました。\n{file_path}")
+        self.store = imported_store; self.top_map.store = self.store; self.iso_map.store = self.store; self.current_pallet_number = None; self.current_note_id = None; self.top_navigation_cursor_location = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.move_undo_stack.clear(); self.move_redo_stack.clear(); self.mark_store_dirty(immediate=True, operation="import"); self.refresh_all(); QMessageBox.information(self, "Import", f"読み込みました。\n{file_path}")
 
     def clear_selection(self) -> None:
         self.disable_table_multi_select()
