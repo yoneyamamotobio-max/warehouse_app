@@ -9,7 +9,7 @@ import ctypes
 import traceback
 import unicodedata
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -27,9 +27,9 @@ DATA_PATH = APP_DIR / "inventory-data.json"
 MOVE_HISTORY_PATH = APP_DIR / "move_history.json"
 ICON_PATH = APP_DIR / "icon.ico"
 STORE_LOG_PATH = APP_DIR / "store-error.log"
-SAVE_HISTORY_LOG_PATH = APP_DIR / "save_history.log"
 APP_ID = "Yone.WarehouseApp"
 DAILY_BACKUP_RETENTION_DAYS = 90
+MOVE_HISTORY_RETENTION_DAYS = 30
 GRID_COLUMNS = 12
 GRID_ROWS = 23
 AISLE_COLUMN_LABELS = {"B", "E", "F", "J"}
@@ -623,17 +623,6 @@ def log_store_error(message: str) -> None:
         pass
 
 
-def log_save_history(status: str, operation: str = "change", error: Optional[Exception] = None) -> None:
-    try:
-        detail = f"{datetime.now():%Y/%m/%d %H:%M:%S} SAVE {status} {operation or 'change'}"
-        if error is not None:
-            detail += f" {error.__class__.__name__}: {error}"
-        with SAVE_HISTORY_LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(detail + "\n")
-    except Exception:
-        pass
-
-
 def read_store_file(path: Path) -> InventoryStore:
     payload = json.loads(path.read_text(encoding="utf-8"))
     return InventoryStore.from_dict(payload)
@@ -714,6 +703,37 @@ def save_move_history(records: List[dict], path: Path = MOVE_HISTORY_PATH) -> bo
         except Exception:
             pass
         return False
+
+
+def move_history_record_datetime(record: dict) -> Optional[datetime]:
+    for key in ("timestamp", "moved_at", "created_at", "updated_at", "操作日時", "移動日時"):
+        value = str(record.get(key, "") or "").strip()
+        if not value:
+            continue
+        for fmt in ("%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def prune_move_history_records(records: List[dict], now: Optional[datetime] = None, retention_days: int = MOVE_HISTORY_RETENTION_DAYS) -> List[dict]:
+    cutoff = (now or datetime.now()).replace(microsecond=0) - timedelta(days=retention_days)
+    kept: List[dict] = []
+    for record in records:
+        recorded_at = move_history_record_datetime(record)
+        if recorded_at is None or recorded_at >= cutoff:
+            kept.append(record)
+    return kept
+
+
+def prune_move_history_file_once(path: Path = MOVE_HISTORY_PATH) -> List[dict]:
+    records = load_move_history(path)
+    pruned = prune_move_history_records(records)
+    if len(pruned) != len(records):
+        save_move_history(pruned, path)
+    return pruned
 
 
 def show_store_recovery_dialog(error: StoreRecoveryError) -> None:
@@ -4483,8 +4503,8 @@ class MainWindow(QMainWindow):
     ]
 
     def __init__(self) -> None:
-        super().__init__(); self.inventory_data_path = DATA_PATH.resolve(); data_file_existed_at_startup = self.inventory_data_path.exists(); self.store = load_store(self.inventory_data_path); create_startup_daily_backup(self.inventory_data_path, data_file_existed_at_startup); self.current_pallet_number = None; self.current_note_id = None
-        self.move_history_records: List[dict] = load_move_history()
+        super().__init__(); self.inventory_data_path = DATA_PATH.resolve(); data_file_existed_at_startup = self.inventory_data_path.exists(); self.store = load_store(self.inventory_data_path); create_startup_daily_backup(self.inventory_data_path, data_file_existed_at_startup); self.loaded_data_time_text = self.initial_loaded_data_time_text(); self.save_status_failed = False; self.current_pallet_number = None; self.current_note_id = None
+        self.move_history_records: List[dict] = prune_move_history_file_once()
         self.last_registration_item_cache: Optional[InventoryItemLine] = None
         self.move_undo_stack: List[MoveAction] = []
         self.move_redo_stack: List[MoveAction] = []
@@ -4546,11 +4566,10 @@ class MainWindow(QMainWindow):
         self.table_press_moved = False
         self.table_multi_select_mode: set[QTableWidget] = set()
         self.store_dirty = False
-        self.save_status_state = "読込済み"
         self.setWindowTitle("Warehouse Management App - PySide6"); self.resize(1480, 920); self.setMinimumSize(900, 620)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
-        self.build_ui(); self.apply_theme(); self.refresh_all()
+        self.build_ui(); self.apply_theme(); self.set_save_status_failed(False); self.refresh_all()
         QApplication.instance().installEventFilter(self)
 
     def build_ui(self) -> None:
@@ -4559,7 +4578,7 @@ class MainWindow(QMainWindow):
         self.summary_label = QLabel(); self.summary_label.setStyleSheet("color:#89a4c2;"); self.summary_label.setWordWrap(True)
         self.save_status_label = QLabel()
         self.save_status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.save_status_label.setMinimumWidth(360)
+        self.save_status_label.setMinimumWidth(240)
         self.save_status_label.setStyleSheet("color:#9fd2ff; font:700 10.5pt 'Yu Gothic UI', 'Segoe UI';")
         self.new_button = QPushButton("新規登録"); self.new_button.clicked.connect(self.open_registration)
         self.add_note_button = QPushButton("メモ追加"); self.add_note_button.clicked.connect(self.open_map_note_dialog)
@@ -5835,7 +5854,6 @@ class MainWindow(QMainWindow):
         placed_pallets = self.placed_pallets()
         capacity = self.capacity_percent()
         self.summary_label.setText(f"パレット {len(placed_pallets)} / 明細 {sum(len(p.items) for p in placed_pallets)} / 総枚数 {sum(p.total_sheets for p in placed_pallets)} / 使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
-        self.update_save_status_display()
         self.update_move_history_buttons()
         self.top_map.invalidate_base_cache()
         self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_shipment_table(); self.refresh_memo_table(); self.refresh_history_table(); self.refresh_detail()
@@ -5843,34 +5861,30 @@ class MainWindow(QMainWindow):
     def normalize_store_stacks(self) -> None:
         self.store.normalize_stacks()
 
-    def save_status_timestamp_text(self) -> str:
-        path = getattr(self, "inventory_data_path", DATA_PATH)
+    def initial_loaded_data_time_text(self) -> str:
         try:
-            saved_at = datetime.fromtimestamp(path.stat().st_mtime)
+            return datetime.fromtimestamp(self.inventory_data_path.stat().st_mtime).strftime("%H:%M")
         except Exception:
             return "-"
-        return saved_at.strftime("%Y/%m/%d %H:%M:%S")
 
-    def update_save_status_display(self, state: Optional[str] = None) -> None:
+    def set_save_status_failed(self, failed: bool) -> None:
+        self.save_status_failed = failed
         label = getattr(self, "save_status_label", None)
         if label is None:
             return
-        if state is None:
-            state = getattr(self, "save_status_state", "未保存" if getattr(self, "store_dirty", False) else "読込済み")
-        self.save_status_state = state
-        warning = state in {"未保存", "保存失敗"}
         path = getattr(self, "inventory_data_path", DATA_PATH)
-        text = f"{path.name} / 最終保存 {self.save_status_timestamp_text()} / {'⚠ ' if warning else ''}{state}"
+        text = f"読込データ：{getattr(self, 'loaded_data_time_text', '-')}"
+        if failed:
+            text += " / ⚠ 保存失敗"
         label.setText(text)
         label.setToolTip(str(path))
         label.setStyleSheet(
-            "color:#ffce73; font:700 10.5pt 'Yu Gothic UI', 'Segoe UI';" if warning
+            "color:#ffce73; font:700 10.5pt 'Yu Gothic UI', 'Segoe UI';" if failed
             else "color:#9fd2ff; font:700 10.5pt 'Yu Gothic UI', 'Segoe UI';"
         )
 
     def mark_store_dirty(self, immediate: bool = False, operation: str = "change") -> None:
         self.store_dirty = True
-        self.update_save_status_display("未保存")
         self.persist_store_if_dirty(operation)
 
     def prepare_store_for_save(self) -> None:
@@ -5892,18 +5906,16 @@ class MainWindow(QMainWindow):
             try:
                 save_store(self.store, target_path)
                 self.store_dirty = False
-                log_save_history("OK", operation)
-                if target_path.resolve() == getattr(self, "inventory_data_path", DATA_PATH).resolve():
-                    self.update_save_status_display("保存済み")
+                if getattr(self, "save_status_failed", False) and target_path.resolve() == getattr(self, "inventory_data_path", DATA_PATH).resolve():
+                    self.set_save_status_failed(False)
                 if target_path != DATA_PATH:
                     QMessageBox.information(self, "保存", f"保存しました。\n{target_path}")
                 return True
             except Exception as error:
                 last_error = error
                 self.store_dirty = True
-                self.update_save_status_display("保存失敗")
-                log_save_history("ERROR", operation, error)
-                log_store_error(f"save failed: {target_path}\n{traceback.format_exc()}")
+                self.set_save_status_failed(True)
+                log_store_error(f"save failed ({operation}): {target_path}\n{traceback.format_exc()}")
 
             action = self.show_save_failure_dialog(target_path, last_error)
             if action == "retry":
