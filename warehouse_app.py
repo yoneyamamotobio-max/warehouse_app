@@ -30,6 +30,7 @@ STORE_LOG_PATH = APP_DIR / "store-error.log"
 APP_ID = "Yone.WarehouseApp"
 DAILY_BACKUP_RETENTION_DAYS = 90
 MOVE_HISTORY_RETENTION_DAYS = 30
+SHIPMENT_HISTORY_RETENTION_DAYS = 30
 GRID_COLUMNS = 12
 GRID_ROWS = 23
 AISLE_COLUMN_LABELS = {"B", "E", "F", "J"}
@@ -734,6 +735,28 @@ def prune_move_history_file_once(path: Path = MOVE_HISTORY_PATH) -> List[dict]:
     if len(pruned) != len(records):
         save_move_history(pruned, path)
     return pruned
+
+
+def shipment_record_datetime(shipment: ShipmentRecord) -> Optional[datetime]:
+    value = str(getattr(shipment, "shipped_at", "") or "").strip()
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def prune_shipment_records(records: List[ShipmentRecord], now: Optional[datetime] = None, retention_days: int = SHIPMENT_HISTORY_RETENTION_DAYS) -> List[ShipmentRecord]:
+    cutoff = (now or datetime.now()).replace(microsecond=0) - timedelta(days=retention_days)
+    kept: List[ShipmentRecord] = []
+    for shipment in records:
+        shipped_at = shipment_record_datetime(shipment)
+        if shipped_at is None or shipped_at >= cutoff:
+            kept.append(shipment)
+    return kept
 
 
 def show_store_recovery_dialog(error: StoreRecoveryError) -> None:
@@ -4513,6 +4536,7 @@ class MainWindow(QMainWindow):
         self.inventory_sort_desc = False
         self.shipment_sort_key = "shipped_at"
         self.shipment_sort_desc = True
+        self.shipment_table_dirty = True
         self.memo_sort_key = "location"
         self.memo_sort_desc = False
         self.settings = QSettings(APP_ID, "WarehouseApp")
@@ -4569,7 +4593,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Warehouse Management App - PySide6"); self.resize(1480, 920); self.setMinimumSize(900, 620)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
-        self.build_ui(); self.apply_theme(); self.set_save_status_failed(False); self.refresh_all()
+        self.build_ui(); self.apply_theme(); self.set_save_status_failed(False); self.prune_old_shipments_on_startup(); self.refresh_all()
         QApplication.instance().installEventFilter(self)
 
     def build_ui(self) -> None:
@@ -4602,7 +4626,7 @@ class MainWindow(QMainWindow):
         self.redo_move_button.setObjectName("viewHistoryButton")
         self.undo_move_button.setToolTip("直前のパレットまたはメモ移動を戻す")
         self.redo_move_button.setToolTip("戻したパレットまたはメモ移動をやり直す")
-        self.search_input = QLineEdit(); self.search_input.setPlaceholderText("例: 39 LL 10 A"); self.search_input.setClearButtonEnabled(True); self.search_input.textChanged.connect(self.refresh_all)
+        self.search_input = QLineEdit(); self.search_input.setPlaceholderText("例: 39 LL 10 A"); self.search_input.setClearButtonEnabled(True); self.search_input.textChanged.connect(self.handle_search_text_changed)
         self.copy_inventory_button = QPushButton("一覧コピー"); self.copy_inventory_button.clicked.connect(self.copy_inventory_table)
         self.copy_shipment_button = QPushButton("一覧コピー"); self.copy_shipment_button.clicked.connect(self.copy_shipment_table)
         self.export_inventory_button = QPushButton("棚卸データ出力"); self.export_inventory_button.clicked.connect(self.copy_inventory_summary)
@@ -5208,7 +5232,7 @@ class MainWindow(QMainWindow):
 
     def handle_tab_changed(self, _index: int) -> None:
         is_inventory = self.tabs.currentIndex() == 2
-        is_shipment = self.tabs.currentIndex() == 3
+        is_shipment = self.is_shipment_tab_active()
         is_memo = hasattr(self, "memo_table") and self.tabs.currentIndex() == 4
         is_history = hasattr(self, "history_table") and self.tabs.currentIndex() == 5
         is_help = hasattr(self, "help_tab_widget") and self.tabs.currentWidget() == self.help_tab_widget
@@ -5221,6 +5245,8 @@ class MainWindow(QMainWindow):
         self.delete_shipment_button.setVisible(is_shipment)
         if hasattr(self, "iso_rotate_button"):
             self.iso_rotate_button.setVisible(self.tabs.currentIndex() == 1)
+        if is_shipment:
+            self.refresh_shipment_table_if_needed()
         if is_memo:
             self.refresh_memo_table()
         if is_history:
@@ -5551,6 +5577,14 @@ class MainWindow(QMainWindow):
         self.update_detail_overlay_geometry()
         self.update_top_navigation_controls_geometry()
 
+    def handle_search_text_changed(self) -> None:
+        if self.is_shipment_tab_active():
+            self.refresh_shipment_table()
+            self.shipment_table_dirty = False
+        else:
+            self.shipment_table_dirty = True
+            self.refresh_all()
+
     def keyPressEvent(self, event) -> None:
         key_map = {
             Qt.Key_Up: (0, -1),
@@ -5856,10 +5890,37 @@ class MainWindow(QMainWindow):
         self.summary_label.setText(f"パレット {len(placed_pallets)} / 明細 {sum(len(p.items) for p in placed_pallets)} / 総枚数 {sum(p.total_sheets for p in placed_pallets)} / 使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
         self.update_move_history_buttons()
         self.top_map.invalidate_base_cache()
-        self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_shipment_table(); self.refresh_memo_table(); self.refresh_history_table(); self.refresh_detail()
+        self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_memo_table(); self.refresh_history_table(); self.refresh_detail()
 
     def normalize_store_stacks(self) -> None:
         self.store.normalize_stacks()
+
+    def prune_old_shipments_on_startup(self) -> None:
+        pruned = prune_shipment_records(self.store.shipments)
+        if len(pruned) == len(self.store.shipments):
+            return
+        self.store.shipments = pruned
+        self.shipment_table_dirty = True
+        self.mark_store_dirty(operation="shipment_retention")
+
+    def tab_contains_widget(self, widget: QWidget) -> bool:
+        current = self.tabs.currentWidget()
+        return bool(current is widget or (current is not None and current.isAncestorOf(widget)))
+
+    def is_shipment_tab_active(self) -> bool:
+        table = getattr(self, "shipment_table", None)
+        return bool(table is not None and hasattr(self, "tabs") and self.tab_contains_widget(table))
+
+    def refresh_shipment_table_if_needed(self) -> None:
+        if not getattr(self, "shipment_table_dirty", True):
+            return
+        self.refresh_shipment_table()
+        self.shipment_table_dirty = False
+
+    def mark_shipment_table_dirty(self) -> None:
+        self.shipment_table_dirty = True
+        if self.is_shipment_tab_active():
+            self.refresh_shipment_table_if_needed()
 
     def initial_loaded_data_time_text(self) -> str:
         try:
@@ -6301,6 +6362,7 @@ class MainWindow(QMainWindow):
                 if col == 0:
                     item.setData(Qt.UserRole, shipment.shipment_id)
                 self.shipment_table.setItem(row_index, col, item)
+        self.shipment_table_dirty = False
 
     def note_location_label(self, note: MapNoteRecord) -> str:
         map_x = getattr(note, "map_x", None)
@@ -6573,6 +6635,7 @@ class MainWindow(QMainWindow):
         self.copy_table_to_clipboard(self.inventory_table, skip_hidden_columns=True)
 
     def copy_shipment_table(self) -> None:
+        self.refresh_shipment_table_if_needed()
         self.copy_table_to_clipboard(self.shipment_table)
 
     def inventory_summary_identifier(self, item: InventoryItemLine) -> str:
@@ -6657,6 +6720,7 @@ class MainWindow(QMainWindow):
             if shipment_id:
                 target_ids.append(str(shipment_id))
         self.store.shipments = [shipment for shipment in self.store.shipments if shipment.shipment_id not in target_ids]
+        self.mark_shipment_table_dirty()
         self.mark_store_dirty(operation="shipment_delete")
         self.refresh_all()
 
@@ -6719,6 +6783,7 @@ class MainWindow(QMainWindow):
             restored_numbers.append(pallet_number)
         target_ids = {shipment.shipment_id for shipment in target_shipments}
         self.store.shipments = [shipment for shipment in self.store.shipments if shipment.shipment_id not in target_ids]
+        self.mark_shipment_table_dirty()
         self.store.normalize_stacks()
         if restored_numbers:
             self.select_pallet(restored_numbers[0])
@@ -6845,6 +6910,7 @@ class MainWindow(QMainWindow):
         )
         self.store.shipments.append(shipment)
         self.store.pallets = [item for item in self.store.pallets if item.pallet_number != pallet.pallet_number]
+        self.mark_shipment_table_dirty()
         self.normalize_store_stacks()
         next_pallet_number = self.next_pallet_after_shipping(shipped_location, shipped_stack_order)
         if next_pallet_number:
@@ -7587,7 +7653,7 @@ class MainWindow(QMainWindow):
             log_store_error(f"import failed: {import_path}\n{traceback.format_exc()}")
             QMessageBox.warning(self, "Import", f"読み込みに失敗しました。現在のデータは変更していません。\n{file_path}")
             return
-        self.store = imported_store; self.top_map.store = self.store; self.iso_map.store = self.store; self.current_pallet_number = None; self.current_note_id = None; self.top_navigation_cursor_location = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.move_undo_stack.clear(); self.move_redo_stack.clear(); self.mark_store_dirty(immediate=True, operation="import"); self.refresh_all(); QMessageBox.information(self, "Import", f"読み込みました。\n{file_path}")
+        self.store = imported_store; self.top_map.store = self.store; self.iso_map.store = self.store; self.current_pallet_number = None; self.current_note_id = None; self.top_navigation_cursor_location = None; self.top_map.selected_pallet = None; self.top_map.selected_pallets = set(); self.top_map.selected_note = None; self.top_map.hover_pallet = None; self.iso_map.selected_pallet = None; self.move_undo_stack.clear(); self.move_redo_stack.clear(); self.mark_shipment_table_dirty(); self.mark_store_dirty(immediate=True, operation="import"); self.refresh_all(); QMessageBox.information(self, "Import", f"読み込みました。\n{file_path}")
 
     def clear_selection(self) -> None:
         self.disable_table_multi_select()
