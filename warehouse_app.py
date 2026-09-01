@@ -45,6 +45,7 @@ TOP_VIEW_SELECTED_STACK_OFFSET_X = 28
 TOP_VIEW_SELECTED_STACK_OFFSET_Y = 22
 TOP_VIEW_DRAG_THRESHOLD_PX = 10
 TOP_VIEW_DRAG_HOLD_MS = 450
+TOP_VIEW_DRAG_CACHE_PREPARE_DELAY_MS = 250
 COLOR_PRESETS = {
     "AUTO": ("自動", None),
     "BLUE": ("青", "#57C1FF"),
@@ -3051,6 +3052,7 @@ class TopMapWidget(QWidget):
         self.drag_cache_pixmap: Optional[QPixmap] = None
         self.drag_cache_pallet: Optional[str] = None
         self.drag_cache_note: Optional[str] = None
+        self.drag_cache_key = None
         self.pan_offset = QPoint()
         self.panning = False
         self.pan_anchor = QPoint()
@@ -3504,6 +3506,7 @@ class TopMapWidget(QWidget):
         self.drag_cache_pixmap = None
         self.drag_cache_pallet = None
         self.drag_cache_note = None
+        self.drag_cache_key = None
 
     def render_top_map(self, painter: QPainter, exclude_pallet: Optional[str] = None, exclude_note: Optional[str] = None, static_cache: bool = False) -> None:
         saved_state = None
@@ -3599,11 +3602,12 @@ class TopMapWidget(QWidget):
         self.base_cache_key = self.cache_key()
         self.base_cache_dirty = False
 
-    def rebuild_drag_cache(self) -> None:
+    def rebuild_drag_cache(self, exclude_pallet: Optional[str] = None, exclude_note: Optional[str] = None) -> None:
         if self.width() <= 0 or self.height() <= 0:
             return
-        exclude_pallet = self.dragging_pallet
-        exclude_note = self.dragging_note
+        if exclude_pallet is None and exclude_note is None:
+            exclude_pallet = self.dragging_pallet
+            exclude_note = self.dragging_note
         pixmap = QPixmap(self.size())
         cache_painter = QPainter(pixmap)
         self.render_top_map(cache_painter, exclude_pallet=exclude_pallet, exclude_note=exclude_note, static_cache=True)
@@ -3611,6 +3615,16 @@ class TopMapWidget(QWidget):
         self.drag_cache_pixmap = pixmap
         self.drag_cache_pallet = exclude_pallet
         self.drag_cache_note = exclude_note
+        self.drag_cache_key = self.cache_key()
+
+    def has_valid_drag_cache(self, exclude_pallet: Optional[str], exclude_note: Optional[str]) -> bool:
+        return (
+            self.drag_cache_pixmap is not None
+            and self.drag_cache_pixmap.size() == self.size()
+            and self.drag_cache_pallet == exclude_pallet
+            and self.drag_cache_note == exclude_note
+            and self.drag_cache_key == self.cache_key()
+        )
 
     def draw_cached_overlay_pallet(self, painter: QPainter, pallet_number: str) -> None:
         pallet = self.store.get_pallet(pallet_number)
@@ -3691,7 +3705,7 @@ class TopMapWidget(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         if self.is_dragging and (self.dragging_pallet or self.dragging_note):
-            if self.drag_cache_pixmap is None or self.drag_cache_pixmap.size() != self.size() or self.drag_cache_pallet != self.dragging_pallet or self.drag_cache_note != self.dragging_note:
+            if not self.has_valid_drag_cache(self.dragging_pallet, self.dragging_note):
                 self.rebuild_drag_cache()
             if self.drag_cache_pixmap is not None:
                 painter.drawPixmap(0, 0, self.drag_cache_pixmap)
@@ -3840,7 +3854,16 @@ class TopMapWidget(QWidget):
         QToolTip.hideText()
         self.setCursor(Qt.PointingHandCursor)
         self.drag_hold_timer.start(TOP_VIEW_DRAG_HOLD_MS)
+        QTimer.singleShot(TOP_VIEW_DRAG_CACHE_PREPARE_DELAY_MS, self.prepare_pending_drag_cache)
         self.update()
+
+    def prepare_pending_drag_cache(self) -> None:
+        if self.is_dragging or not self.pending_drag_kind or not self.pending_drag_id:
+            return
+        exclude_pallet = self.pending_drag_id if self.pending_drag_kind == "pallet" else None
+        exclude_note = self.pending_drag_id if self.pending_drag_kind == "note" else None
+        if not self.has_valid_drag_cache(exclude_pallet, exclude_note):
+            self.rebuild_drag_cache(exclude_pallet=exclude_pallet, exclude_note=exclude_note)
 
     def enable_pending_drag(self) -> None:
         self.pending_drag_hold_ready = True
@@ -3864,12 +3887,10 @@ class TopMapWidget(QWidget):
             return False
         self.is_dragging = True
         self.drag_candidate_label = self.candidate_label_at(self.drag_point)
-        self.drag_cache_pixmap = None
-        self.drag_cache_pallet = None
-        self.drag_cache_note = None
         self.setCursor(Qt.ArrowCursor)
         self.dragStarted.emit()
-        self.rebuild_drag_cache()
+        if not self.has_valid_drag_cache(self.dragging_pallet, self.dragging_note):
+            self.rebuild_drag_cache()
         self.request_drag_update(None, self.current_drag_update_rect())
         return True
 
@@ -3968,6 +3989,7 @@ class TopMapWidget(QWidget):
         self.drag_cache_pixmap = None
         self.drag_cache_pallet = None
         self.drag_cache_note = None
+        self.drag_cache_key = None
         self.drag_candidate_label = None
         self.is_dragging = False
         self.setToolTip("")
@@ -5892,6 +5914,20 @@ class MainWindow(QMainWindow):
         self.top_map.invalidate_base_cache()
         self.top_map.update(); self.iso_map.update(); self.refresh_inventory_table(); self.refresh_memo_table(); self.refresh_history_table(); self.refresh_detail()
 
+    def refresh_after_pallet_move(self) -> None:
+        self.store.ensure_defaults()
+        placed_pallets = self.placed_pallets()
+        capacity = self.capacity_percent()
+        self.summary_label.setText(f"パレット {len(placed_pallets)} / 明細 {sum(len(p.items) for p in placed_pallets)} / 総枚数 {sum(p.total_sheets for p in placed_pallets)} / 使用率 {capacity:.1f}% / 禁止マス {len(self.store.blocked_locations)}")
+        self.update_move_history_buttons()
+        self.top_map.invalidate_base_cache()
+        self.top_map.update()
+        if hasattr(self, "tabs") and self.tabs.currentIndex() == 1:
+            self.iso_map.update()
+        self.refresh_inventory_table()
+        self.refresh_history_table()
+        self.refresh_detail()
+
     def normalize_store_stacks(self) -> None:
         self.store.normalize_stacks()
 
@@ -6025,11 +6061,11 @@ class MainWindow(QMainWindow):
             return ""
         return f"{visible_location_code(state.location_code)}-{max(1, state.stack_order + 1)}"
 
-    def append_move_history_records(self, records: List[dict]) -> None:
+    def append_move_history_records(self, records: List[dict], refresh_ui: bool = True) -> None:
         if not records:
             return
         self.move_history_records.extend(records)
-        if save_move_history(self.move_history_records):
+        if save_move_history(self.move_history_records) and refresh_ui:
             self.refresh_history_table()
 
     def pallet_move_history_records(
@@ -6920,7 +6956,7 @@ class MainWindow(QMainWindow):
         self.mark_store_dirty(operation="shipment_add")
         self.refresh_all()
 
-    def select_pallet(self, pallet_number: str) -> None:
+    def select_pallet(self, pallet_number: str, refresh_ui: bool = True) -> None:
         if self.current_pallet_number != pallet_number:
             self.detail_frame_manual_position = None
         self.current_pallet_number = pallet_number
@@ -6931,6 +6967,8 @@ class MainWindow(QMainWindow):
         self.top_map.selected_pallets = {pallet_number}
         self.top_map.selected_note = None
         self.iso_map.selected_pallet = pallet_number
+        if not refresh_ui:
+            return
         self.apply_responsive_layout()
         self.top_map.invalidate_base_cache()
         self.top_map.update()
@@ -7233,7 +7271,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "redo_move_button"):
             self.redo_move_button.setEnabled(bool(self.move_redo_stack))
 
-    def apply_move_action(self, action: MoveAction, use_after: bool) -> bool:
+    def apply_move_action(self, action: MoveAction, use_after: bool, refresh_ui: bool = True) -> bool:
         if action.kind == "pallet":
             states = action.pallet_after if use_after else action.pallet_before
             applied = False
@@ -7254,7 +7292,7 @@ class MainWindow(QMainWindow):
                 return False
             self.store.normalize_stacks()
             if self.store.get_pallet(action.target_id) is not None:
-                self.select_pallet(action.target_id)
+                self.select_pallet(action.target_id, refresh_ui=refresh_ui)
         elif action.kind == "note":
             note = self.store.get_map_note(action.target_id)
             state = action.note_after if use_after else action.note_before
@@ -7266,30 +7304,46 @@ class MainWindow(QMainWindow):
         else:
             return False
         self.mark_store_dirty(operation="move_redo" if use_after else "move_undo")
-        self.refresh_all()
+        if refresh_ui:
+            if action.kind == "pallet":
+                self.refresh_after_pallet_move()
+            else:
+                self.refresh_all()
         return True
 
     def undo_last_move(self) -> None:
         if not self.move_undo_stack:
             return
         action = self.move_undo_stack.pop()
-        if self.apply_move_action(action, use_after=False):
+        is_pallet_move = action.kind == "pallet"
+        refreshed = False
+        if self.apply_move_action(action, use_after=False, refresh_ui=not is_pallet_move):
             if action.kind == "pallet":
                 moved = [pallet for state in action.pallet_before if (pallet := self.store.get_pallet(state.pallet_number)) is not None]
-                self.append_move_history_records(self.pallet_move_history_records(moved, action.pallet_after, action.pallet_before))
+                self.append_move_history_records(self.pallet_move_history_records(moved, action.pallet_after, action.pallet_before), refresh_ui=False)
             self.move_redo_stack.append(action)
-        self.update_move_history_buttons()
+            if is_pallet_move:
+                self.refresh_after_pallet_move()
+                refreshed = True
+        if not refreshed:
+            self.update_move_history_buttons()
 
     def redo_last_move(self) -> None:
         if not self.move_redo_stack:
             return
         action = self.move_redo_stack.pop()
-        if self.apply_move_action(action, use_after=True):
+        is_pallet_move = action.kind == "pallet"
+        refreshed = False
+        if self.apply_move_action(action, use_after=True, refresh_ui=not is_pallet_move):
             if action.kind == "pallet":
                 moved = [pallet for state in action.pallet_after if (pallet := self.store.get_pallet(state.pallet_number)) is not None]
-                self.append_move_history_records(self.pallet_move_history_records(moved, action.pallet_before, action.pallet_after))
+                self.append_move_history_records(self.pallet_move_history_records(moved, action.pallet_before, action.pallet_after), refresh_ui=False)
             self.move_undo_stack.append(action)
-        self.update_move_history_buttons()
+            if is_pallet_move:
+                self.refresh_after_pallet_move()
+                refreshed = True
+        if not refreshed:
+            self.update_move_history_buttons()
 
     def open_map_note_dialog(self) -> None:
         dialog = MapNoteDialog(self)
@@ -7414,10 +7468,10 @@ class MainWindow(QMainWindow):
             pallet_before=before,
             pallet_after=after,
         ))
-        self.append_move_history_records(self.pallet_move_history_records(members, before, after))
-        self.select_pallet(pallet_number)
+        self.append_move_history_records(self.pallet_move_history_records(members, before, after), refresh_ui=False)
+        self.select_pallet(pallet_number, refresh_ui=False)
         self.mark_store_dirty(operation="pallet_move")
-        self.refresh_all()
+        self.refresh_after_pallet_move()
 
     def rotate_selected_pallet(self) -> None:
         pallet = self.store.get_pallet(self.current_pallet_number or "")
