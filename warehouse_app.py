@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ MOVE_HISTORY_PATH = APP_DIR / "move_history.json"
 ICON_PATH = APP_DIR / "icon.ico"
 STORE_LOG_PATH = APP_DIR / "store-error.log"
 APP_ID = "Yone.WarehouseApp"
+SINGLE_INSTANCE_ERROR_MESSAGE = "倉庫アプリは既に起動しています"
 DAILY_BACKUP_RETENTION_DAYS = 90
 MOVE_HISTORY_RETENTION_DAYS = 30
 SHIPMENT_HISTORY_RETENTION_DAYS = 30
@@ -115,6 +117,49 @@ AUTO_PART_COLOR_RULES = {
 AUTO_OTHER_COLOR = ("GRAY", "その他", "#7A8EA6")
 VALID_SIZES = ["L", "LL", "EL", "OL"]
 VALID_GRADES = ["A", "B", "C", "K", "片A", "S", ""]
+
+
+class SingleInstanceLockError(RuntimeError):
+    pass
+
+
+class SingleInstanceAlreadyRunningError(SingleInstanceLockError):
+    pass
+
+
+def normalized_data_path_key(path: Path = DATA_PATH) -> str:
+    return os.path.normcase(str(path.resolve()))
+
+
+def single_instance_mutex_name(path: Path = DATA_PATH) -> str:
+    path_key = normalized_data_path_key(path)
+    path_hash = hashlib.sha256(path_key.encode("utf-8")).hexdigest()
+    return f"Local\\{APP_ID}.DataPath.{path_hash}"
+
+
+def acquire_single_instance_lock(path: Path = DATA_PATH):
+    if sys.platform != "win32":
+        return None
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_mutex = kernel32.CreateMutexW
+    create_mutex.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    create_mutex.restype = ctypes.c_void_p
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_bool
+
+    ctypes.set_last_error(0)
+    handle = create_mutex(None, False, single_instance_mutex_name(path))
+    last_error = ctypes.get_last_error()
+    if not handle:
+        raise SingleInstanceLockError(
+            f"起動確認用ロックを取得できませんでした。\n保存先: {path.resolve()}\nエラー: {ctypes.FormatError(last_error)}"
+        )
+    if last_error == 183:
+        close_handle(handle)
+        raise SingleInstanceAlreadyRunningError(SINGLE_INSTANCE_ERROR_MESSAGE)
+    return handle
 
 
 def clamp_font_size_offset(value) -> float:
@@ -7909,6 +7954,15 @@ def main() -> int:
         except Exception:
             pass
     app = QApplication(sys.argv)
+    single_instance_lock = None
+    try:
+        single_instance_lock = acquire_single_instance_lock(DATA_PATH)
+    except SingleInstanceAlreadyRunningError as error:
+        QMessageBox.information(None, "起動確認", str(error))
+        return 1
+    except SingleInstanceLockError as error:
+        QMessageBox.critical(None, "起動確認", str(error))
+        return 1
     startup_font_offset = load_font_size_offset()
     app_font = app.font()
     if app_font.pointSizeF() > 0:
