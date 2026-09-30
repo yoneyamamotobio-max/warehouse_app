@@ -31,6 +31,12 @@ APP_ID = "Yone.WarehouseApp"
 DAILY_BACKUP_RETENTION_DAYS = 90
 MOVE_HISTORY_RETENTION_DAYS = 30
 SHIPMENT_HISTORY_RETENTION_DAYS = 30
+FONT_SIZE_SETTINGS_KEY = "ui/font_size_offset"
+FONT_SIZE_OFFSET = 1.0
+FONT_SIZE_OFFSET_MIN = -2.5
+FONT_SIZE_OFFSET_MAX = 3.0
+FONT_SIZE_OFFSET_STEP = 0.5
+FONT_FAMILY = "'Yu Gothic UI', 'Segoe UI'"
 GRID_COLUMNS = 12
 GRID_ROWS = 23
 AISLE_COLUMN_LABELS = {"B", "E", "F", "J"}
@@ -109,6 +115,38 @@ AUTO_PART_COLOR_RULES = {
 AUTO_OTHER_COLOR = ("GRAY", "その他", "#7A8EA6")
 VALID_SIZES = ["L", "LL", "EL", "OL"]
 VALID_GRADES = ["A", "B", "C", "K", "片A", "S", ""]
+
+
+def clamp_font_size_offset(value) -> float:
+    try:
+        offset = float(value)
+    except (TypeError, ValueError):
+        offset = FONT_SIZE_OFFSET
+    return max(FONT_SIZE_OFFSET_MIN, min(FONT_SIZE_OFFSET_MAX, offset))
+
+
+def load_font_size_offset(settings: Optional[QSettings] = None) -> float:
+    settings = settings or QSettings(APP_ID, "WarehouseApp")
+    return clamp_font_size_offset(settings.value(FONT_SIZE_SETTINGS_KEY, FONT_SIZE_OFFSET))
+
+
+def inherited_font_size_offset(parent: Optional[QWidget]) -> float:
+    if parent is not None:
+        value = parent.property("font_size_offset")
+        if value is not None:
+            return clamp_font_size_offset(value)
+    return load_font_size_offset()
+
+
+def font_pt(base_size: float, offset: float) -> float:
+    return max(6.0, float(base_size) + clamp_font_size_offset(offset))
+
+
+def font_pt_text(base_size: float, offset: float) -> str:
+    value = font_pt(base_size, offset)
+    if abs(value - round(value)) < 0.01:
+        return str(int(round(value)))
+    return f"{value:.1f}".rstrip("0").rstrip(".")
 
 
 def column_label(index: int) -> str:
@@ -1392,7 +1430,8 @@ class HintedTableDelegate(QStyledItemDelegate):
             combo = QComboBox(parent)
             combo.addItems(self.combo_options[index.column()])
             combo.setEditable(False)
-            combo.setStyleSheet("QComboBox { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:4px 8px; font:11pt 'Yu Gothic UI', 'Segoe UI'; }")
+            combo_offset = inherited_font_size_offset(parent)
+            combo.setStyleSheet(f"QComboBox {{ background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:4px 8px; font:{font_pt_text(11, combo_offset)}pt {FONT_FAMILY}; }}")
             return combo
         editor = super().createEditor(parent, option, index)
         target = editor.lineEdit() if hasattr(editor, "lineEdit") else editor
@@ -1754,6 +1793,9 @@ class RepeatStepController(QObject):
 
 
 class RememberedWindowDialog(QDialog):
+    def font_pt(self, base_size: float) -> str:
+        return font_pt_text(base_size, getattr(self, "font_size_offset", inherited_font_size_offset(self.parentWidget())))
+
     def configure_window_persistence(self, settings_prefix: str) -> None:
         self.setWindowFlag(Qt.WindowMaximizeButtonHint, True)
         self.window_settings = QSettings(APP_ID, "WarehouseApp")
@@ -1808,6 +1850,8 @@ class RegistrationDialog(RememberedWindowDialog):
         initial_item: Optional[InventoryItemLine] = None,
     ) -> None:
         super().__init__(parent)
+        self.font_size_offset = inherited_font_size_offset(parent)
+        self.setProperty("font_size_offset", self.font_size_offset)
         self.setWindowTitle("新規登録")
         self.setSizeGripEnabled(True)
         self.configure_window_persistence(self.WINDOW_SETTINGS_PREFIX)
@@ -1941,7 +1985,7 @@ class RegistrationDialog(RememberedWindowDialog):
         input_layout.addStretch(1)
 
         list_title = QLabel("登録済み明細")
-        list_title.setStyleSheet("font:700 12pt 'Yu Gothic UI', 'Segoe UI'; color:#dff6ff;")
+        list_title.setStyleSheet(f"font:700 {self.font_pt(12)}pt {FONT_FAMILY}; color:#dff6ff;")
         list_layout.addWidget(list_title)
         self.item_table = QTableWidget(0, 8)
         self.item_table.setHorizontalHeaderLabels(["品番", "サイズ", "厚み", "加工 / 裏表", "グレード", "枚数", "Lot", "備考"])
@@ -1964,24 +2008,24 @@ class RegistrationDialog(RememberedWindowDialog):
         self.item_table.setGridStyle(Qt.SolidLine)
         self.item_table.verticalHeader().setVisible(False)
         self.item_table.setAlternatingRowColors(True)
-        self.item_table.setStyleSheet("""
-        QTableWidget {
+        self.item_table.setStyleSheet(f"""
+        QTableWidget {{
             background:#07111e;
             alternate-background-color:#0a1726;
             color:#f6fbff;
             gridline-color:#284967;
             selection-background-color:#1f6fb3;
             selection-color:#ffffff;
-            font:11pt 'Yu Gothic UI', 'Segoe UI';
-        }
-        QHeaderView::section {
+            font:{self.font_pt(11)}pt {FONT_FAMILY};
+        }}
+        QHeaderView::section {{
             background:#102033;
             color:#f6fbff;
             border-right:1px solid #5f7890;
             border-bottom:1px solid #5f7890;
             padding:6px;
-            font:700 11pt 'Yu Gothic UI', 'Segoe UI';
-        }
+            font:700 {self.font_pt(11)}pt {FONT_FAMILY};
+        }}
         """)
         self.item_table.itemChanged.connect(lambda *_args: self.update_color_controls())
         self.item_table.itemSelectionChanged.connect(self.handle_item_selection_changed)
@@ -2059,7 +2103,7 @@ class RegistrationDialog(RememberedWindowDialog):
             scroll_bar.setValue(max(scroll_bar.minimum(), min(scroll_bar.maximum(), new_value)))
 
     def create_step_control(self, editor: QWidget, step_up, step_down, enabled_check) -> QWidget:
-        editor.setStyleSheet("QLineEdit { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:6px 8px; min-height:40px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }")
+        editor.setStyleSheet(f"QLineEdit {{ background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:6px 8px; min-height:40px; font:{self.font_pt(11.5)}pt {FONT_FAMILY}; }}")
         wrapper = QWidget()
         layout = QHBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2070,21 +2114,21 @@ class RegistrationDialog(RememberedWindowDialog):
         button_column.setSpacing(4)
         up_button = QPushButton("▲")
         down_button = QPushButton("▼")
-        button_style = """
-        QPushButton {
+        button_style = f"""
+        QPushButton {{
             background:#2f80c8;
             color:#ffffff;
             border:1px solid #6ab8ff;
             border-radius:4px;
             padding:2px 0;
-            font:700 12pt 'Yu Gothic UI', 'Segoe UI';
-        }
-        QPushButton:hover { background:#3b95e6; }
-        QPushButton:disabled {
+            font:700 {self.font_pt(12)}pt {FONT_FAMILY};
+        }}
+        QPushButton:hover {{ background:#3b95e6; }}
+        QPushButton:disabled {{
             background:#2b3748;
             color:#71859b;
             border-color:#405066;
-        }
+        }}
         """
         for button, tooltip in [(up_button, "1増やす"), (down_button, "1減らす")]:
             button.setMinimumSize(48, 28)
@@ -2335,6 +2379,8 @@ class EditPalletDialog(RememberedWindowDialog):
 
     def __init__(self, pallet: PalletRecord, locations: List[str], parent: Optional[QWidget] = None, initial_payload: Optional[Tuple[str, str, str, int, str, str, int, List[InventoryItemLine]]] = None) -> None:
         super().__init__(parent)
+        self.font_size_offset = inherited_font_size_offset(parent)
+        self.setProperty("font_size_offset", self.font_size_offset)
         self.setWindowTitle("パレット編集")
         self.setSizeGripEnabled(True)
         self.configure_window_persistence(self.WINDOW_SETTINGS_PREFIX)
@@ -2429,7 +2475,7 @@ class EditPalletDialog(RememberedWindowDialog):
         info_layout.addStretch(1)
 
         detail_title = QLabel("アイテム詳細")
-        detail_title.setStyleSheet("font:700 12pt 'Yu Gothic UI', 'Segoe UI'; color:#dff6ff;")
+        detail_title.setStyleSheet(f"font:700 {self.font_pt(12)}pt {FONT_FAMILY}; color:#dff6ff;")
         detail_layout.addWidget(detail_title)
         self.item_table = ReorderTableWidget(0, 13)
         self.item_table.setItemDelegate(HintedTableDelegate({
@@ -2599,20 +2645,20 @@ class EditPalletDialog(RememberedWindowDialog):
         button = QPushButton(text)
         button.setFocusPolicy(Qt.NoFocus)
         button.setMinimumSize(30, 24)
-        button.setStyleSheet("""
-        QPushButton {
+        button.setStyleSheet(f"""
+        QPushButton {{
             background:#12304d;
             color:#dff6ff;
             border:1px solid #2b5b85;
             border-radius:4px;
             padding:2px 0;
-            font:700 11pt 'Yu Gothic UI', 'Segoe UI';
-        }
-        QPushButton:disabled {
+            font:700 {self.font_pt(11)}pt {FONT_FAMILY};
+        }}
+        QPushButton:disabled {{
             background:#263142;
             color:#75879b;
             border-color:#3f5368;
-        }
+        }}
         """)
         button.setToolTip(tooltip)
         button.setEnabled(enabled_check())
@@ -4562,6 +4608,8 @@ class MainWindow(QMainWindow):
         self.memo_sort_key = "location"
         self.memo_sort_desc = False
         self.settings = QSettings(APP_ID, "WarehouseApp")
+        self.font_size_offset = load_font_size_offset(self.settings)
+        self.setProperty("font_size_offset", self.font_size_offset)
         self.top_navigation_manual_pos: Optional[QPoint] = self.load_top_navigation_position()
         self.top_navigation_press_global = QPoint()
         self.top_navigation_press_pos = QPoint()
@@ -4589,8 +4637,8 @@ class MainWindow(QMainWindow):
         self.cell_popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.cell_popup.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.cell_popup.setStyleSheet(
-            "QLabel { background:#fff7cc; color:#111111; border:1px solid #806000; "
-            "border-radius:6px; padding:10px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }"
+            f"QLabel {{ background:#fff7cc; color:#111111; border:1px solid #806000; "
+            f"border-radius:6px; padding:10px; font:{self.font_pt(11.5)}pt {FONT_FAMILY}; }}"
         )
         self.cell_popup.hide()
         self.memo_text_popup = QTextEdit(self.centralWidget() or self)
@@ -4598,8 +4646,8 @@ class MainWindow(QMainWindow):
         self.memo_text_popup.setReadOnly(True)
         self.memo_text_popup.setLineWrapMode(QTextEdit.WidgetWidth)
         self.memo_text_popup.setStyleSheet(
-            "QTextEdit { background:#fff7cc; color:#111111; border:1px solid #806000; "
-            "border-radius:6px; padding:10px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }"
+            f"QTextEdit {{ background:#fff7cc; color:#111111; border:1px solid #806000; "
+            f"border-radius:6px; padding:10px; font:{self.font_pt(11.5)}pt {FONT_FAMILY}; }}"
         )
         self.memo_text_popup.hide()
         self.cell_popup_timer.timeout.connect(self.hide_table_popup)
@@ -4615,17 +4663,35 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Warehouse Management App - PySide6"); self.resize(1480, 920); self.setMinimumSize(900, 620)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
-        self.build_ui(); self.apply_theme(); self.set_save_status_failed(False); self.prune_old_shipments_on_startup(); self.refresh_all()
+        self.build_ui(); self.apply_theme(); self.update_table_row_heights(); self.update_popup_font_styles(); self.update_help_font_styles(); self.set_save_status_failed(False); self.prune_old_shipments_on_startup(); self.refresh_all()
         QApplication.instance().installEventFilter(self)
 
     def build_ui(self) -> None:
         central = QWidget(); self.setCentralWidget(central); root = QVBoxLayout(central); root.setContentsMargins(14, 14, 14, 14); root.setSpacing(10)
-        self.title_label = QLabel("大阪工場倉庫"); self.title_label.setStyleSheet("font:700 18px 'Yu Gothic UI', 'Segoe UI'; color:#7fd0ff;")
+        self.title_label = QLabel("大阪工場倉庫"); self.title_label.setStyleSheet(f"font:700 {self.font_pt(13.5)}pt {FONT_FAMILY}; color:#7fd0ff;")
         self.summary_label = QLabel(); self.summary_label.setStyleSheet("color:#89a4c2;"); self.summary_label.setWordWrap(True)
         self.save_status_label = QLabel()
         self.save_status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.save_status_label.setMinimumWidth(240)
-        self.save_status_label.setStyleSheet("color:#9fd2ff; font:700 10.5pt 'Yu Gothic UI', 'Segoe UI';")
+        self.save_status_label.setStyleSheet(f"color:#9fd2ff; font:700 {self.font_pt(10.5)}pt {FONT_FAMILY};")
+        self.font_size_label = QLabel("文字サイズ")
+        self.font_size_label.setObjectName("fontSizeLabel")
+        self.font_size_down_button = QPushButton("-")
+        self.font_size_down_button.setObjectName("fontSizeButton")
+        self.font_size_down_button.setToolTip("文字を小さくします")
+        self.font_size_display = QLabel()
+        self.font_size_display.setObjectName("fontSizeDisplay")
+        self.font_size_display.setAlignment(Qt.AlignCenter)
+        self.font_size_up_button = QPushButton("+")
+        self.font_size_up_button.setObjectName("fontSizeButton")
+        self.font_size_up_button.setToolTip("文字を大きくします")
+        for button in (self.font_size_down_button, self.font_size_up_button):
+            button.setFixedSize(34, 32)
+            button.setFocusPolicy(Qt.NoFocus)
+        self.font_size_display.setMinimumWidth(58)
+        self.font_size_down_button.clicked.connect(lambda: self.change_font_size_offset(-FONT_SIZE_OFFSET_STEP))
+        self.font_size_up_button.clicked.connect(lambda: self.change_font_size_offset(FONT_SIZE_OFFSET_STEP))
+        self.update_font_size_controls()
         self.new_button = QPushButton("新規登録"); self.new_button.clicked.connect(self.open_registration)
         self.add_note_button = QPushButton("メモ追加"); self.add_note_button.clicked.connect(self.open_map_note_dialog)
         self.blocked_mode_button = QPushButton("置けないマス"); self.blocked_mode_button.setCheckable(True); self.blocked_mode_button.toggled.connect(self.set_blocked_edit_mode)
@@ -4664,7 +4730,13 @@ class MainWindow(QMainWindow):
         self.copy_inventory_button.setMinimumHeight(40)
         self.copy_shipment_button.setMinimumHeight(40)
         self.inventory_columns_button.setMinimumHeight(40)
-        title_row = QHBoxLayout(); title_row.addWidget(self.title_label); title_row.addWidget(self.summary_label, 1); title_row.addWidget(self.save_status_label, 0, Qt.AlignRight)
+        font_size_row = QHBoxLayout()
+        font_size_row.setSpacing(4)
+        font_size_row.addWidget(self.font_size_label)
+        font_size_row.addWidget(self.font_size_down_button)
+        font_size_row.addWidget(self.font_size_display)
+        font_size_row.addWidget(self.font_size_up_button)
+        title_row = QHBoxLayout(); title_row.addWidget(self.title_label); title_row.addWidget(self.summary_label, 1); title_row.addWidget(self.save_status_label, 0, Qt.AlignRight); title_row.addLayout(font_size_row)
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
         for widget in [self.new_button, self.add_note_button, self.blocked_mode_button]:
@@ -4925,7 +4997,8 @@ class MainWindow(QMainWindow):
         ]
 
         title = QLabel("操作ヘルプ")
-        title.setStyleSheet("font:700 18px 'Yu Gothic UI'; color:#dff6ff;")
+        title.setObjectName("helpTitle")
+        title.setStyleSheet(f"font:700 {self.font_pt(13.5)}pt {FONT_FAMILY}; color:#dff6ff;")
         layout.addWidget(title)
         for heading, text in sections:
             card = QFrame()
@@ -4933,11 +5006,13 @@ class MainWindow(QMainWindow):
             card_layout.setContentsMargins(14, 12, 14, 12)
             card_layout.setSpacing(8)
             heading_label = QLabel(heading)
-            heading_label.setStyleSheet("font:700 13pt 'Yu Gothic UI', 'Segoe UI'; color:#7fd0ff;")
+            heading_label.setProperty("help_role", "heading")
+            heading_label.setStyleSheet(f"font:700 {self.font_pt(13)}pt {FONT_FAMILY}; color:#7fd0ff;")
             body_label = QLabel(text)
             body_label.setTextFormat(Qt.RichText if "<" in text and ">" in text else Qt.PlainText)
             body_label.setWordWrap(True)
-            body_label.setStyleSheet("color:#e7f3ff; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; line-height:1.8;")
+            body_label.setProperty("help_role", "body")
+            body_label.setStyleSheet(f"color:#e7f3ff; font:{self.font_pt(11.5)}pt {FONT_FAMILY}; line-height:1.8;")
             card.setStyleSheet("QFrame { background:#0d1726; border:1px solid #2b455f; border-radius:10px; }")
             card_layout.addWidget(heading_label)
             card_layout.addWidget(body_label)
@@ -5205,6 +5280,7 @@ class MainWindow(QMainWindow):
     def update_stack_detail_style(self) -> None:
         compact = self.width() < 1180
         narrow = self.width() < 980
+        detail_font = self.font_pt(10 if narrow else (11 if compact else 11.5))
         current_note = self.store.get_map_note(self.current_note_id or "") if hasattr(self, "store") else None
         if current_note is not None:
             color = QColor(COLOR_PRESETS.get(current_note.color_key, COLOR_PRESETS["YELLOW"])[1] or "#FFC34D")
@@ -5214,7 +5290,7 @@ class MainWindow(QMainWindow):
             self.detail_frame.setStyleSheet(f"background:{soft.name(QColor.HexArgb)}; border:2px solid {border_color}; border-radius:8px;")
             self.stack_detail_selector.setVisible(False)
             self.stack_detail_pages.setStyleSheet(
-                f"QLabel {{ background:transparent; color:#fff7d6; font:{'10pt' if narrow else ('11pt' if compact else '11.5pt')} 'Yu Gothic UI', 'Segoe UI'; }}"
+                f"QLabel {{ background:transparent; color:#fff7d6; font:{detail_font}pt {FONT_FAMILY}; }}"
             )
             return
         current_pallet = self.current_stack_detail_pallet()
@@ -5229,7 +5305,7 @@ class MainWindow(QMainWindow):
             f"QListWidget#stackDetailSelector::item:selected {{ background:{border_color}; color:#10161e; }}"
         )
         self.stack_detail_pages.setStyleSheet(
-            f"QLabel {{ background:transparent; color:#fff7d6; font:{'10pt' if narrow else ('11pt' if compact else '11.5pt')} 'Yu Gothic UI', 'Segoe UI'; }}"
+            f"QLabel {{ background:transparent; color:#fff7d6; font:{detail_font}pt {FONT_FAMILY}; }}"
         )
 
     def update_tab_visuals(self) -> None:
@@ -5482,8 +5558,8 @@ class MainWindow(QMainWindow):
         narrow = width < 980
         button_height = 34 if compact else 40
         combo_height = 34 if compact else 40
-        self.title_label.setStyleSheet(f"font:700 {'16' if compact else '18'}px 'Yu Gothic UI', 'Segoe UI'; color:#7fd0ff;")
-        self.summary_label.setStyleSheet(f"color:#89a4c2; font:{'10pt' if compact else '11pt'} 'Yu Gothic UI', 'Segoe UI';")
+        self.title_label.setStyleSheet(f"font:700 {self.font_pt(12 if compact else 13.5)}pt {FONT_FAMILY}; color:#7fd0ff;")
+        self.summary_label.setStyleSheet(f"color:#89a4c2; font:{self.font_pt(10 if compact else 11)}pt {FONT_FAMILY};")
         text_map = {
             self.new_button: "新規" if compact else "新規登録",
             self.add_note_button: "メモ" if compact else "メモ追加",
@@ -5532,6 +5608,47 @@ class MainWindow(QMainWindow):
             self.iso_rotate_button.move(max(10, self.iso_map.width() - self.iso_rotate_button.width() - 14), 12)
         self.update_top_navigation_controls_geometry()
         self.update_stack_detail_style()
+        self.update_font_size_controls()
+
+    def update_table_row_heights(self) -> None:
+        row_sizes = {
+            "inventory_table": 36,
+            "shipment_table": 36,
+            "memo_table": 42,
+            "history_table": 38,
+        }
+        extra = max(0, int(round(self.font_size_offset)))
+        for name, base_size in row_sizes.items():
+            table = getattr(self, name, None)
+            if table is None:
+                continue
+            table.verticalHeader().setDefaultSectionSize(base_size + (extra * 2))
+            table.horizontalHeader().setMinimumHeight(42 + (extra * 2))
+
+    def update_popup_font_styles(self) -> None:
+        if hasattr(self, "cell_popup"):
+            self.cell_popup.setStyleSheet(
+                f"QLabel {{ background:#fff7cc; color:#111111; border:1px solid #806000; "
+                f"border-radius:6px; padding:10px; font:{self.font_pt(11.5)}pt {FONT_FAMILY}; }}"
+            )
+        if hasattr(self, "memo_text_popup"):
+            self.memo_text_popup.setStyleSheet(
+                f"QTextEdit {{ background:#fff7cc; color:#111111; border:1px solid #806000; "
+                f"border-radius:6px; padding:10px; font:{self.font_pt(11.5)}pt {FONT_FAMILY}; }}"
+            )
+
+    def update_help_font_styles(self) -> None:
+        if not hasattr(self, "help_page"):
+            return
+        title = self.help_page.findChild(QLabel, "helpTitle")
+        if title is not None:
+            title.setStyleSheet(f"font:700 {self.font_pt(13.5)}pt {FONT_FAMILY}; color:#dff6ff;")
+        for label in self.help_page.findChildren(QLabel):
+            role = label.property("help_role")
+            if role == "heading":
+                label.setStyleSheet(f"font:700 {self.font_pt(13)}pt {FONT_FAMILY}; color:#7fd0ff;")
+            elif role == "body":
+                label.setStyleSheet(f"color:#e7f3ff; font:{self.font_pt(11.5)}pt {FONT_FAMILY}; line-height:1.8;")
 
     def update_detail_overlay_geometry(self) -> None:
         if not hasattr(self, "detail_frame") or not hasattr(self, "map_container") or not hasattr(self, "stack_detail_pages"):
@@ -5621,16 +5738,45 @@ class MainWindow(QMainWindow):
             return
         super().keyPressEvent(event)
 
+    def font_pt(self, base_size: float) -> str:
+        return font_pt_text(base_size, self.font_size_offset)
+
+    def update_font_size_controls(self) -> None:
+        if not hasattr(self, "font_size_display"):
+            return
+        self.font_size_display.setText(f"{self.font_pt(11.5)}pt")
+        self.font_size_down_button.setEnabled(self.font_size_offset > FONT_SIZE_OFFSET_MIN)
+        self.font_size_up_button.setEnabled(self.font_size_offset < FONT_SIZE_OFFSET_MAX)
+
+    def change_font_size_offset(self, delta: float) -> None:
+        new_offset = clamp_font_size_offset(self.font_size_offset + delta)
+        if abs(new_offset - self.font_size_offset) < 0.01:
+            return
+        self.font_size_offset = new_offset
+        self.setProperty("font_size_offset", self.font_size_offset)
+        self.settings.setValue(FONT_SIZE_SETTINGS_KEY, self.font_size_offset)
+        self.settings.sync()
+        self.apply_font_size_to_existing_ui()
+
+    def apply_font_size_to_existing_ui(self) -> None:
+        self.apply_theme()
+        self.apply_responsive_layout()
+        self.update_table_row_heights()
+        self.update_popup_font_styles()
+        self.update_help_font_styles()
+        self.update_font_size_controls()
+        self.update_detail_overlay_geometry()
+
     def apply_theme(self) -> None:
-        self.setStyleSheet("""
-        QWidget { background:#091522; color:#e7f3ff; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }
-        QFrame { background:#0f1d2c; border:1px solid #163450; border-radius:8px; }
-        QFrame#topNavigationControls { background:rgba(9, 21, 34, 150); border:2px solid #3f7fad; border-radius:8px; }
-        QPushButton#topNavigationButton { background:#1d5d99; color:white; border:2px solid #7fd0ff; border-radius:6px; font:700 18pt 'Yu Gothic UI', 'Segoe UI'; padding:0; }
-        QPushButton#topNavigationButton:pressed { background:#2f8fd4; }
-        QLineEdit, QComboBox, QTableWidget { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:7px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }
-        QSpinBox, QAbstractSpinBox { background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:5px 30px 5px 6px; min-height:38px; font:11.5pt 'Yu Gothic UI', 'Segoe UI'; }
-        QSpinBox::up-button, QAbstractSpinBox::up-button {
+        self.setStyleSheet(f"""
+        QWidget {{ background:#091522; color:#e7f3ff; font:{self.font_pt(11.5)}pt {FONT_FAMILY}; }}
+        QFrame {{ background:#0f1d2c; border:1px solid #163450; border-radius:8px; }}
+        QFrame#topNavigationControls {{ background:rgba(9, 21, 34, 150); border:2px solid #3f7fad; border-radius:8px; }}
+        QPushButton#topNavigationButton {{ background:#1d5d99; color:white; border:2px solid #7fd0ff; border-radius:6px; font:700 {self.font_pt(18)}pt {FONT_FAMILY}; padding:0; }}
+        QPushButton#topNavigationButton:pressed {{ background:#2f8fd4; }}
+        QLineEdit, QComboBox, QTableWidget {{ background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:7px; font:{self.font_pt(11.5)}pt {FONT_FAMILY}; }}
+        QSpinBox, QAbstractSpinBox {{ background:#06101c; color:#f6fbff; border:1px solid #254d77; border-radius:6px; padding:5px 30px 5px 6px; min-height:38px; font:{self.font_pt(11.5)}pt {FONT_FAMILY}; }}
+        QSpinBox::up-button, QAbstractSpinBox::up-button {{
             subcontrol-origin: border;
             subcontrol-position: top right;
             width:24px;
@@ -5639,8 +5785,8 @@ class MainWindow(QMainWindow):
             border-left:1px solid #254d77;
             border-bottom:1px solid #254d77;
             border-top-right-radius:6px;
-        }
-        QSpinBox::down-button, QAbstractSpinBox::down-button {
+        }}
+        QSpinBox::down-button, QAbstractSpinBox::down-button {{
             subcontrol-origin: border;
             subcontrol-position: bottom right;
             width:24px;
@@ -5648,130 +5794,148 @@ class MainWindow(QMainWindow):
             background:#163450;
             border-left:1px solid #254d77;
             border-bottom-right-radius:6px;
-        }
+        }}
         QSpinBox::up-button:hover, QAbstractSpinBox::up-button:hover,
-        QSpinBox::down-button:hover, QAbstractSpinBox::down-button:hover { background:#1d5d99; }
-        QPushButton { background:#1d5d99; color:white; border:none; border-radius:8px; padding:8px 8px; font:600 12pt 'Yu Gothic UI', 'Segoe UI'; }
-        QPushButton:hover { background:#2675c2; }
-        QPushButton:checked { background:#8f3d47; }
-        QPushButton#blockedModeButton {
-            font:600 10.5pt 'Yu Gothic UI', 'Segoe UI';
+        QSpinBox::down-button:hover, QAbstractSpinBox::down-button:hover {{ background:#1d5d99; }}
+        QPushButton {{ background:#1d5d99; color:white; border:none; border-radius:8px; padding:8px 8px; font:600 {self.font_pt(12)}pt {FONT_FAMILY}; }}
+        QPushButton:hover {{ background:#2675c2; }}
+        QPushButton:checked {{ background:#8f3d47; }}
+        QPushButton#blockedModeButton {{
+            font:600 {self.font_pt(10.5)}pt {FONT_FAMILY};
             padding:8px 7px;
-        }
-        QPushButton#viewHistoryButton {
+        }}
+        QPushButton#fontSizeButton {{
+            background:#174a76;
+            border:1px solid #5fa9df;
+            border-radius:6px;
+            padding:0;
+            font:700 {self.font_pt(12)}pt {FONT_FAMILY};
+        }}
+        QPushButton#fontSizeButton:disabled {{
+            background:#152434;
+            color:#607488;
+            border-color:#2a4054;
+        }}
+        QLabel#fontSizeLabel, QLabel#fontSizeDisplay {{
+            color:#9fd2ff;
+            background:transparent;
+            border:none;
+            font:700 {self.font_pt(10)}pt {FONT_FAMILY};
+        }}
+        QPushButton#viewHistoryButton {{
             background:#174a76;
             border:1px solid #5fa9df;
             border-radius:6px;
             padding:6px 12px;
-            font:700 11.5pt 'Yu Gothic UI', 'Segoe UI';
-        }
-        QPushButton#viewHistoryButton:hover { background:#236ba6; }
-        QPushButton#viewHistoryButton:disabled {
+            font:700 {self.font_pt(11.5)}pt {FONT_FAMILY};
+        }}
+        QPushButton#viewHistoryButton:hover {{ background:#236ba6; }}
+        QPushButton#viewHistoryButton:disabled {{
             background:#152434;
             color:#607488;
             border-color:#2a4054;
-        }
-        QHeaderView::section { background:#11253d; color:#9dd9ff; border:none; padding:8px 6px; font:600 12.5pt 'Yu Gothic UI', 'Segoe UI'; }
-        QTableWidget#inventoryTable {
+        }}
+        QHeaderView::section {{ background:#11253d; color:#9dd9ff; border:none; padding:8px 6px; font:600 {self.font_pt(12.5)}pt {FONT_FAMILY}; }}
+        QTableWidget#inventoryTable {{
             gridline-color:#34506a;
             border:1px solid #34506a;
             background:#07121f;
             alternate-background-color:#0b1828;
-        }
-        QTableWidget#inventoryTable::item {
+        }}
+        QTableWidget#inventoryTable::item {{
             padding:7px 6px;
             border-right:1px solid #24384d;
             border-bottom:1px solid #24384d;
-            font:11pt 'Yu Gothic UI', 'Segoe UI';
-        }
-        QTableWidget#inventoryTable::item:selected {
+            font:{self.font_pt(11)}pt {FONT_FAMILY};
+        }}
+        QTableWidget#inventoryTable::item:selected {{
             background:#39d98a;
             color:#07111f;
-        }
-        QTableWidget#inventoryTable QHeaderView::section {
+        }}
+        QTableWidget#inventoryTable QHeaderView::section {{
             background:#102033;
             color:#f6fbff;
             border-right:2px solid #5f7890;
             border-bottom:1px solid #5f7890;
             padding:9px 6px;
-            font:700 12.5pt 'Yu Gothic UI', 'Segoe UI';
-        }
-        QTableWidget#shipmentTable {
+            font:700 {self.font_pt(12.5)}pt {FONT_FAMILY};
+        }}
+        QTableWidget#shipmentTable {{
             gridline-color:#34506a;
             border:1px solid #34506a;
             background:#07121f;
             alternate-background-color:#0b1828;
-        }
-        QTableWidget#shipmentTable::item {
+        }}
+        QTableWidget#shipmentTable::item {{
             padding:7px 6px;
             border-right:1px solid #24384d;
             border-bottom:1px solid #24384d;
-            font:11pt 'Yu Gothic UI', 'Segoe UI';
-        }
-        QTableWidget#shipmentTable::item:selected {
+            font:{self.font_pt(11)}pt {FONT_FAMILY};
+        }}
+        QTableWidget#shipmentTable::item:selected {{
             background:#ff8a80;
             color:#07111f;
-        }
-        QTableWidget#shipmentTable QHeaderView::section {
+        }}
+        QTableWidget#shipmentTable QHeaderView::section {{
             background:#102033;
             color:#f6fbff;
             border-right:2px solid #5f7890;
             border-bottom:1px solid #5f7890;
             padding:9px 6px;
-            font:700 12.5pt 'Yu Gothic UI', 'Segoe UI';
-        }
-        QTableWidget QScrollBar:vertical {
+            font:700 {self.font_pt(12.5)}pt {FONT_FAMILY};
+        }}
+        QTableWidget QScrollBar:vertical {{
             background:#07121f;
             width:30px;
             margin:0;
             border-left:1px solid #254d77;
-        }
-        QTableWidget QScrollBar::handle:vertical {
+        }}
+        QTableWidget QScrollBar::handle:vertical {{
             background:#3f89c8;
             min-height:54px;
             border-radius:10px;
             margin:4px;
-        }
-        QTableWidget QScrollBar::handle:vertical:hover {
+        }}
+        QTableWidget QScrollBar::handle:vertical:hover {{
             background:#65b8f4;
-        }
-        QTableWidget QScrollBar:horizontal {
+        }}
+        QTableWidget QScrollBar:horizontal {{
             background:#07121f;
             height:28px;
             margin:0;
             border-top:1px solid #254d77;
-        }
-        QTableWidget QScrollBar::handle:horizontal {
+        }}
+        QTableWidget QScrollBar::handle:horizontal {{
             background:#3f89c8;
             min-width:54px;
             border-radius:10px;
             margin:4px;
-        }
+        }}
         QTableWidget QScrollBar::add-line,
-        QTableWidget QScrollBar::sub-line {
+        QTableWidget QScrollBar::sub-line {{
             width:0;
             height:0;
-        }
-        QLabel#inventoryHint {
+        }}
+        QLabel#inventoryHint {{
             color:#8fb6d8;
             background:#0c1827;
             border:1px solid #24425e;
             border-radius:6px;
             padding:8px 10px;
-            font:11pt 'Yu Gothic UI', 'Segoe UI';
-        }
-        QFrame#detailResizeHandle {
+            font:{self.font_pt(11)}pt {FONT_FAMILY};
+        }}
+        QFrame#detailResizeHandle {{
             background:#18304b;
             border:1px solid #5f7890;
             border-radius:4px;
-        }
-        QFrame#detailResizeHandle:hover {
+        }}
+        QFrame#detailResizeHandle:hover {{
             background:#244b72;
             border-color:#8fc7ff;
-        }
-        QTabWidget::pane { border:1px solid #1a3c60; background:#07111f; }
-        QTabBar::tab { background:#11253d; color:#88c3f0; padding:11px 16px; margin-right:4px; border-top-left-radius:6px; border-top-right-radius:6px; font:600 12pt 'Yu Gothic UI', 'Segoe UI'; }
-        QTabBar::tab:selected { background:#1d5d99; color:white; }
+        }}
+        QTabWidget::pane {{ border:1px solid #1a3c60; background:#07111f; }}
+        QTabBar::tab {{ background:#11253d; color:#88c3f0; padding:11px 16px; margin-right:4px; border-top-left-radius:6px; border-top-right-radius:6px; font:600 {self.font_pt(12)}pt {FONT_FAMILY}; }}
+        QTabBar::tab:selected {{ background:#1d5d99; color:white; }}
         """)
         self.update_tab_visuals()
 
@@ -5975,9 +6139,9 @@ class MainWindow(QMainWindow):
             text += " / ⚠ 保存失敗"
         label.setText(text)
         label.setToolTip(str(path))
+        color = "#ffce73" if failed else "#9fd2ff"
         label.setStyleSheet(
-            "color:#ffce73; font:700 10.5pt 'Yu Gothic UI', 'Segoe UI';" if failed
-            else "color:#9fd2ff; font:700 10.5pt 'Yu Gothic UI', 'Segoe UI';"
+            f"color:{color}; font:700 {self.font_pt(10.5)}pt {FONT_FAMILY};"
         )
 
     def mark_store_dirty(self, immediate: bool = False, operation: str = "change") -> None:
@@ -7745,6 +7909,11 @@ def main() -> int:
         except Exception:
             pass
     app = QApplication(sys.argv)
+    startup_font_offset = load_font_size_offset()
+    app_font = app.font()
+    if app_font.pointSizeF() > 0:
+        app_font.setPointSizeF(font_pt(app_font.pointSizeF(), startup_font_offset))
+        app.setFont(app_font)
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
     try:
